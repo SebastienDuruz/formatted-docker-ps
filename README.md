@@ -16,7 +16,7 @@ C# Terminal.Gui application that displays `docker ps` in a TUI window and refres
 ## Run in development
 
 ```bash
-dotnet run --project DockerPsTui
+dotnet run --project FormattedDockerPs
 ```
 
 ## Install (Linux)
@@ -52,19 +52,19 @@ docker-ps
 ## Build
 
 ```bash
-dotnet build DockerPsTui
+dotnet build FormattedDockerPs
 ```
 
 ## Publish a Linux executable (single-file)
 
 ```bash
-dotnet publish DockerPsTui -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
+dotnet publish FormattedDockerPs -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
 ```
 
 Generated binary (example):
 
 ```text
-DockerPsTui/bin/Release/net10.0/linux-x64/publish/DockerPsTui
+FormattedDockerPs/bin/Release/net10.0/linux-x64/publish/FormattedDockerPs
 ```
 
 ## Known limitations

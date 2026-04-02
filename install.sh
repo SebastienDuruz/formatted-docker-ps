@@ -3,15 +3,15 @@ set -euo pipefail
 
 APP_NAME="docker-ps"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_PATH="$SCRIPT_DIR/DockerPsTui"
+PROJECT_PATH="$SCRIPT_DIR/FormattedDockerPs"
 
 if ! command -v dotnet >/dev/null 2>&1; then
   echo "Error: dotnet CLI is required but was not found in PATH." >&2
   exit 1
 fi
 
-if [[ ! -f "$PROJECT_PATH/DockerPsTui.csproj" ]]; then
-  echo "Error: project file not found at $PROJECT_PATH/DockerPsTui.csproj" >&2
+if [[ ! -f "$PROJECT_PATH/FormattedDockerPs.csproj" ]]; then
+  echo "Error: project file not found at $PROJECT_PATH/FormattedDockerPs.csproj" >&2
   exit 1
 fi
 
@@ -33,7 +33,7 @@ dotnet publish "$PROJECT_PATH" \
   /p:PublishSingleFile=true \
   /p:PublishTrimmed=false
 
-SOURCE_BIN="$PROJECT_PATH/bin/Release/net10.0/$RUNTIME_ID/publish/DockerPsTui"
+SOURCE_BIN="$PROJECT_PATH/bin/Release/net10.0/$RUNTIME_ID/publish/FormattedDockerPs"
 TARGET_BIN="/usr/local/bin/$APP_NAME"
 
 if [[ ! -f "$SOURCE_BIN" ]]; then
