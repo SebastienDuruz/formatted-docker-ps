@@ -19,6 +19,26 @@ C# Terminal.Gui application that displays `docker ps` in a TUI window and refres
 dotnet run --project DockerPsTui
 ```
 
+## Install (Linux)
+
+Install globally to `/usr/local/bin`:
+
+```bash
+./install.sh
+```
+
+After installation, run from anywhere:
+
+```bash
+docker-ps
+```
+
+## Uninstall (Linux)
+
+```bash
+./uninstall.sh
+```
+
 ## Controls
 
 - `q`: quit
