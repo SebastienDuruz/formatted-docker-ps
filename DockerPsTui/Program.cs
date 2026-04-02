@@ -4,21 +4,21 @@ using Terminal.Gui;
 
 const int RefreshIntervalMs = 1000;
 
-var state = new UiState();
-
+// App setup
 Application.Init();
-var matrixScheme = ApplyGreenOnBlackTheme();
+var matrix = CreateMatrixScheme();
 
 var top = Application.Top;
-top.ColorScheme = matrixScheme;
+top.ColorScheme = matrix;
+
 var window = new Window("Docker PS Monitor")
 {
     X = 0,
     Y = 0,
     Width = Dim.Fill(),
     Height = Dim.Fill(),
+    ColorScheme = matrix,
 };
-window.ColorScheme = matrixScheme;
 
 var tableView = new TextView
 {
@@ -28,379 +28,306 @@ var tableView = new TextView
     Height = Dim.Fill(),
     ReadOnly = true,
     WordWrap = false,
+    ColorScheme = matrix,
 };
-tableView.ColorScheme = matrixScheme;
 
 window.Add(tableView);
 top.Add(window);
 
+var rows = new List<ContainerRow>();
+string? lastError = null;
+var lastRefresh = DateTime.Now;
+var refreshInProgress = false;
+
 void RefreshUi()
 {
-    if (state.IsRefreshing)
+    if (refreshInProgress)
     {
         return;
     }
 
-    state.IsRefreshing = true;
+    refreshInProgress = true;
     try
     {
-        var result = DockerReader.ReadDockerPs();
-        state.Rows = result.Rows;
-        state.LastError = result.Error;
-        state.LastRefresh = DateTime.Now;
+        (rows, lastError) = ReadDockerPs();
+        lastRefresh = DateTime.Now;
 
-        var table = TableRenderer.Render(
-            state.Rows,
+        tableView.Text = RenderTable(
+            rows,
+            lastError,
             tableView.Bounds.Width,
             tableView.Bounds.Height,
-            state.LastRefresh,
-            state.LastError);
-
-        tableView.Text = table;
+            lastRefresh);
     }
     finally
     {
-        state.IsRefreshing = false;
+        refreshInProgress = false;
     }
 }
 
-var timer = new System.Threading.Timer(_ =>
+// Refresh every second on the UI loop.
+using var timer = new System.Threading.Timer(_ =>
 {
     Application.MainLoop?.Invoke(RefreshUi);
 }, null, dueTime: 0, period: RefreshIntervalMs);
 
+// Keep controls intentionally minimal.
 window.KeyPress += args =>
 {
     if (args.KeyEvent.Key == Key.Q || args.KeyEvent.Key == (Key.CtrlMask | Key.Q))
     {
-        timer.Dispose();
         Application.RequestStop();
         args.Handled = true;
-        return;
     }
 };
 
 window.Resized += _ => RefreshUi();
 
 Application.Run();
-timer.Dispose();
 Application.Shutdown();
 
-static ColorScheme ApplyGreenOnBlackTheme()
+static (List<ContainerRow> Rows, string? Error) ReadDockerPs()
 {
-    var normal = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
-    var focus = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
-    var hotNormal = Terminal.Gui.Attribute.Make(Color.BrightGreen, Color.Black);
-    var hotFocus = Terminal.Gui.Attribute.Make(Color.BrightGreen, Color.Black);
-    var matrix = new ColorScheme
+    var psi = new ProcessStartInfo
     {
-        Normal = normal,
-        Focus = focus,
-        HotNormal = hotNormal,
-        HotFocus = hotFocus,
-        Disabled = Terminal.Gui.Attribute.Make(Color.Green, Color.Black),
+        FileName = "docker",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
     };
 
-    Colors.Base = matrix;
-    Colors.TopLevel = matrix;
-    Colors.Dialog = matrix;
-    Colors.Menu = matrix;
-    Colors.Error = new ColorScheme
+    psi.ArgumentList.Add("ps");
+    psi.ArgumentList.Add("--no-trunc");
+    psi.ArgumentList.Add("--format");
+    psi.ArgumentList.Add("{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}");
+
+    using var process = new Process { StartInfo = psi };
+
+    try
     {
-        Normal = Terminal.Gui.Attribute.Make(Color.BrightRed, Color.Black),
-        Focus = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightRed),
-        HotNormal = Terminal.Gui.Attribute.Make(Color.BrightYellow, Color.Black),
-        HotFocus = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightYellow),
-        Disabled = Terminal.Gui.Attribute.Make(Color.DarkGray, Color.Black),
+        process.Start();
+    }
+    catch (Exception ex)
+    {
+        return ([], $"Unable to start docker: {ex.Message}");
+    }
+
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+
+    if (process.ExitCode != 0)
+    {
+        return ([], string.IsNullOrWhiteSpace(stderr) ? "docker ps failed" : stderr.Trim());
+    }
+
+    var parsed = new List<ContainerRow>();
+    foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+    {
+        var cols = line.Split('\t');
+        if (cols.Length < 5)
+        {
+            continue;
+        }
+
+        parsed.Add(new ContainerRow(cols[0], cols[1], cols[2], cols[3], cols[4]));
+    }
+
+    return (parsed, null);
+}
+
+static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int width, int height, DateTime refreshedAt)
+{
+    width = Math.Max(20, width);
+    height = Math.Max(6, height);
+
+    var columns = PickColumns(width);
+    var columnWidths = ComputeWidths(columns.Select(c => c.MinWidth).ToArray(), width);
+
+    var sb = new StringBuilder();
+
+    if (!string.IsNullOrWhiteSpace(error))
+    {
+        sb.AppendLine($"ERROR: {error}");
+        sb.AppendLine();
+    }
+
+    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(RenderRow(columns.Select(c => c.Header).ToArray(), columnWidths));
+    sb.AppendLine(HRule(columnWidths));
+
+    var maxRows = Math.Max(1, height - 6 - (string.IsNullOrWhiteSpace(error) ? 0 : 2));
+    var visible = rows.Take(maxRows).ToList();
+
+    foreach (var row in visible)
+    {
+        var values = columns.Select(c => c.Value(row)).ToArray();
+        sb.AppendLine(RenderRow(values, columnWidths));
+    }
+
+    if (visible.Count == 0)
+    {
+        sb.AppendLine(RenderMessageRow(columnWidths, "No running containers"));
+    }
+    else if (rows.Count > visible.Count)
+    {
+        sb.AppendLine(RenderMessageRow(columnWidths, $"... {rows.Count - visible.Count} hidden row(s) ..."));
+    }
+
+    sb.AppendLine(HRule(columnWidths));
+    sb.Append($"Containers: {rows.Count} | Refresh: {refreshedAt:HH:mm:ss} | q: quit");
+
+    return sb.ToString();
+}
+
+// Small terminals show fewer columns instead of breaking layout.
+static Column[] PickColumns(int width)
+{
+    if (width < 48)
+    {
+        return
+        [
+            new("NAME", 10, r => r.Name),
+            new("STATUS", 8, r => r.Status),
+        ];
+    }
+
+    if (width < 78)
+    {
+        return
+        [
+            new("NAME", 12, r => r.Name),
+            new("STATUS", 10, r => r.Status),
+            new("ID", 8, r => r.Id),
+        ];
+    }
+
+    if (width < 108)
+    {
+        return
+        [
+            new("NAME", 12, r => r.Name),
+            new("STATUS", 10, r => r.Status),
+            new("ID", 8, r => r.Id),
+            new("IMAGE", 12, r => r.Image),
+        ];
+    }
+
+    return
+    [
+        new("NAME", 12, r => r.Name),
+        new("STATUS", 10, r => r.Status),
+        new("ID", 8, r => r.Id),
+        new("IMAGE", 12, r => r.Image),
+        new("PORTS", 12, r => r.Ports),
+    ];
+}
+
+static int[] ComputeWidths(int[] minWidths, int totalWidth)
+{
+    var separators = (minWidths.Length * 3) + 1;
+    var budget = Math.Max(minWidths.Length, totalWidth - separators);
+
+    var widths = (int[])minWidths.Clone();
+    var used = widths.Sum();
+
+    // First shrink if minimums do not fit.
+    while (used > budget)
+    {
+        var changed = false;
+        for (var i = widths.Length - 1; i >= 0 && used > budget; i--)
+        {
+            if (widths[i] > 4)
+            {
+                widths[i]--;
+                used--;
+                changed = true;
+            }
+        }
+
+        if (!changed)
+        {
+            break;
+        }
+    }
+
+    // Then spread remaining width evenly.
+    var extra = budget - used;
+    for (var i = 0; extra > 0; i = (i + 1) % widths.Length)
+    {
+        widths[i]++;
+        extra--;
+    }
+
+    return widths;
+}
+
+static string HRule(IReadOnlyList<int> widths)
+{
+    var sb = new StringBuilder("+");
+    foreach (var w in widths)
+    {
+        sb.Append(' ', 1).Append('-', w).Append(' ', 1).Append('+');
+    }
+
+    return sb.ToString();
+}
+
+static string RenderRow(IReadOnlyList<string> values, IReadOnlyList<int> widths)
+{
+    var sb = new StringBuilder("|");
+    for (var i = 0; i < values.Count; i++)
+    {
+        var cell = Fit(values[i], widths[i]);
+        sb.Append(' ').Append(cell.PadRight(widths[i])).Append(' ').Append('|');
+    }
+
+    return sb.ToString();
+}
+
+static string RenderMessageRow(IReadOnlyList<int> widths, string message)
+{
+    var contentWidth = widths.Sum() + (widths.Count * 3) - 1;
+    var cell = Fit(message, contentWidth);
+    return $"| {cell.PadRight(contentWidth)} |";
+}
+
+static string Fit(string value, int width)
+{
+    if (width <= 1)
+    {
+        return value.Length == 0 ? string.Empty : value[..1];
+    }
+
+    if (value.Length <= width)
+    {
+        return value;
+    }
+
+    return value[..(width - 1)] + "…";
+}
+
+static ColorScheme CreateMatrixScheme()
+{
+    var green = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
+    var brightGreen = Terminal.Gui.Attribute.Make(Color.BrightGreen, Color.Black);
+
+    var scheme = new ColorScheme
+    {
+        Normal = green,
+        Focus = green,
+        HotNormal = brightGreen,
+        HotFocus = brightGreen,
+        Disabled = green,
     };
 
-    return matrix;
-}
+    Colors.Base = scheme;
+    Colors.TopLevel = scheme;
+    Colors.Dialog = scheme;
+    Colors.Menu = scheme;
 
-static class DockerReader
-{
-    public static DockerResult ReadDockerPs()
-    {
-        var dockerPath = ResolveDockerBinary();
-        if (dockerPath is null)
-        {
-            return new DockerResult([], "docker not found in PATH");
-        }
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = dockerPath,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-
-        psi.ArgumentList.Add("ps");
-        psi.ArgumentList.Add("--no-trunc");
-        psi.ArgumentList.Add("--format");
-        psi.ArgumentList.Add("{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}");
-
-        using var process = new Process { StartInfo = psi };
-
-        try
-        {
-            process.Start();
-        }
-        catch (Exception ex)
-        {
-            return new DockerResult([], $"Unable to start docker: {ex.Message}");
-        }
-
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
-        process.WaitForExit();
-
-        if (process.ExitCode != 0)
-        {
-            var err = string.IsNullOrWhiteSpace(stderr) ? "docker ps failed" : stderr.Trim();
-            return new DockerResult([], err);
-        }
-
-        var rows = new List<ContainerRow>();
-        foreach (var rawLine in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var cols = rawLine.Split('\t');
-            if (cols.Length < 5)
-            {
-                continue;
-            }
-
-            rows.Add(new ContainerRow(
-                Id: cols[0],
-                Image: cols[1],
-                Status: cols[2],
-                Ports: cols[3],
-                Name: cols[4]));
-        }
-
-        return new DockerResult(rows, null);
-    }
-
-    private static string? ResolveDockerBinary()
-    {
-        var envPath = Environment.GetEnvironmentVariable("PATH");
-        if (string.IsNullOrWhiteSpace(envPath))
-        {
-            return null;
-        }
-
-        foreach (var dir in envPath.Split(':', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var candidate = Path.Combine(dir, "docker");
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
-    }
-}
-
-static class TableRenderer
-{
-    public static string Render(
-        IReadOnlyList<ContainerRow> rows,
-        int width,
-        int height,
-        DateTime lastRefresh,
-        string? error)
-    {
-        width = Math.Max(20, width);
-        height = Math.Max(6, height);
-
-        var specs = PickColumns(width);
-        var colWidths = ComputeColumnWidths(specs, width);
-
-        var sb = new StringBuilder();
-
-        if (!string.IsNullOrWhiteSpace(error))
-        {
-            sb.AppendLine($"ERROR: {error}");
-            sb.AppendLine();
-        }
-
-        sb.AppendLine(HorizontalRule(colWidths));
-        sb.AppendLine(RenderRow(specs, colWidths, isHeader: true));
-        sb.AppendLine(HorizontalRule(colWidths));
-
-        var rowsAvailable = Math.Max(1, height - 6 - (string.IsNullOrWhiteSpace(error) ? 0 : 2));
-        var visible = rows.Take(rowsAvailable).ToList();
-
-        foreach (var row in visible)
-        {
-            sb.AppendLine(RenderRow(specs, colWidths, row));
-        }
-
-        if (visible.Count == 0)
-        {
-            sb.AppendLine(RenderEmptyRow(colWidths, "No running containers"));
-        }
-
-        if (rows.Count > visible.Count)
-        {
-            sb.AppendLine(RenderEmptyRow(colWidths, $"... {rows.Count - visible.Count} hidden row(s) ..."));
-        }
-
-        sb.AppendLine(HorizontalRule(colWidths));
-        sb.Append($"Containers: {rows.Count} | Refresh: {lastRefresh:HH:mm:ss} | q: quit");
-
-        return sb.ToString();
-    }
-
-    private static List<ColumnSpec> PickColumns(int width)
-    {
-        if (width < 40)
-        {
-            return [new("NAME", 8, 44, row => row.Name)];
-        }
-
-        var cols = new List<ColumnSpec>
-        {
-            new("NAME", 12, 44, row => row.Name),
-            new("STATUS", 8, 34, row => row.Status),
-        };
-
-        if (width >= 55)
-        {
-            cols.Add(new("ID", 8, 12, row => row.Id));
-        }
-
-        if (width >= 75)
-        {
-            cols.Add(new("IMAGE", 16, 46, row => row.Image));
-        }
-
-        if (width >= 100)
-        {
-            cols.Add(new("PORTS", 12, 40, row => row.Ports));
-        }
-
-        return cols;
-    }
-
-    private static List<int> ComputeColumnWidths(IReadOnlyList<ColumnSpec> specs, int totalWidth)
-    {
-        var separators = (specs.Count * 3) + 1;
-        var contentBudget = Math.Max(specs.Count, totalWidth - separators);
-
-        var widths = specs.Select(s => s.MinWidth).ToList();
-        var used = widths.Sum();
-
-        if (used > contentBudget)
-        {
-            var deficit = used - contentBudget;
-            while (deficit > 0)
-            {
-                var shrunk = false;
-                for (var i = 0; i < widths.Count && deficit > 0; i++)
-                {
-                    if (widths[i] > 4)
-                    {
-                        widths[i]--;
-                        deficit--;
-                        shrunk = true;
-                    }
-                }
-
-                if (!shrunk)
-                {
-                    break;
-                }
-            }
-        }
-
-        used = widths.Sum();
-        var extra = Math.Max(0, contentBudget - used);
-
-        var open = true;
-        while (extra > 0 && open)
-        {
-            open = false;
-            for (var i = 0; i < specs.Count && extra > 0; i++)
-            {
-                if (widths[i] < specs[i].MaxWidth)
-                {
-                    widths[i]++;
-                    extra--;
-                    open = true;
-                }
-            }
-        }
-
-        return widths;
-    }
-
-    private static string HorizontalRule(IReadOnlyList<int> widths)
-    {
-        var sb = new StringBuilder();
-        sb.Append('+');
-        foreach (var w in widths)
-        {
-            sb.Append(' ', 1);
-            sb.Append('-', w);
-            sb.Append(' ', 1);
-            sb.Append('+');
-        }
-
-        return sb.ToString();
-    }
-
-    private static string RenderRow(IReadOnlyList<ColumnSpec> specs, IReadOnlyList<int> widths, ContainerRow? row = null, bool isHeader = false)
-    {
-        var sb = new StringBuilder();
-        sb.Append('|');
-
-        for (var i = 0; i < specs.Count; i++)
-        {
-            var text = isHeader ? specs[i].Header : specs[i].Getter(row!);
-            var fitted = Fit(text, widths[i]);
-            sb.Append(' ');
-            sb.Append(fitted.PadRight(widths[i]));
-            sb.Append(' ');
-            sb.Append('|');
-        }
-
-        return sb.ToString();
-    }
-
-    private static string RenderEmptyRow(IReadOnlyList<int> widths, string text)
-    {
-        var joinedWidth = widths.Sum() + (widths.Count * 3) - 1;
-        var fitted = Fit(text, joinedWidth);
-        return $"| {fitted.PadRight(joinedWidth)} |";
-    }
-
-    private static string Fit(string? value, int width)
-    {
-        value ??= string.Empty;
-        if (width <= 1)
-        {
-            return value.Length == 0 ? "" : value[..1];
-        }
-
-        if (value.Length <= width)
-        {
-            return value;
-        }
-
-        return value[..(width - 1)] + "…";
-    }
-}
-
-sealed class UiState
-{
-    public bool IsRefreshing { get; set; }
-    public List<ContainerRow> Rows { get; set; } = [];
-    public DateTime LastRefresh { get; set; } = DateTime.Now;
-    public string? LastError { get; set; }
+    return scheme;
 }
 
 sealed record ContainerRow(string Id, string Image, string Status, string Ports, string Name);
-sealed record DockerResult(List<ContainerRow> Rows, string? Error);
-sealed record ColumnSpec(string Header, int MinWidth, int MaxWidth, Func<ContainerRow, string> Getter);
+sealed record Column(string Header, int MinWidth, Func<ContainerRow, string> Value);
