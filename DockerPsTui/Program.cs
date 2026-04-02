@@ -124,7 +124,7 @@ static class DockerReader
         var dockerPath = ResolveDockerBinary();
         if (dockerPath is null)
         {
-            return new DockerResult([], "docker introuvable dans le PATH");
+            return new DockerResult([], "docker not found in PATH");
         }
 
         var psi = new ProcessStartInfo
@@ -148,7 +148,7 @@ static class DockerReader
         }
         catch (Exception ex)
         {
-            return new DockerResult([], $"Impossible de lancer docker: {ex.Message}");
+            return new DockerResult([], $"Unable to start docker: {ex.Message}");
         }
 
         var stdout = process.StandardOutput.ReadToEnd();
@@ -157,7 +157,7 @@ static class DockerReader
 
         if (process.ExitCode != 0)
         {
-            var err = string.IsNullOrWhiteSpace(stderr) ? "docker ps a échoué" : stderr.Trim();
+            var err = string.IsNullOrWhiteSpace(stderr) ? "docker ps failed" : stderr.Trim();
             return new DockerResult([], err);
         }
 
@@ -221,7 +221,7 @@ static class TableRenderer
 
         if (!string.IsNullOrWhiteSpace(error))
         {
-            sb.AppendLine($"ERREUR: {error}");
+            sb.AppendLine($"ERROR: {error}");
             sb.AppendLine();
         }
 
@@ -239,16 +239,16 @@ static class TableRenderer
 
         if (visible.Count == 0)
         {
-            sb.AppendLine(RenderEmptyRow(colWidths, "Aucun conteneur en cours"));
+            sb.AppendLine(RenderEmptyRow(colWidths, "No running containers"));
         }
 
         if (rows.Count > visible.Count)
         {
-            sb.AppendLine(RenderEmptyRow(colWidths, $"... {rows.Count - visible.Count} ligne(s) masquée(s) ..."));
+            sb.AppendLine(RenderEmptyRow(colWidths, $"... {rows.Count - visible.Count} hidden row(s) ..."));
         }
 
         sb.AppendLine(HorizontalRule(colWidths));
-        sb.Append($"Conteneurs: {rows.Count} | Refresh: {lastRefresh:HH:mm:ss} | q: quitter");
+        sb.Append($"Containers: {rows.Count} | Refresh: {lastRefresh:HH:mm:ss} | q: quit");
 
         return sb.ToString();
     }

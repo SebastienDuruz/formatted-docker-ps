@@ -1,34 +1,33 @@
 # formatted-docker-ps
 
-Application C# (Terminal.Gui) qui affiche `docker ps` dans une fenêtre TUI et rafraîchit l'affichage toutes les secondes.
+C# Terminal.Gui application that displays `docker ps` in a TUI window and refreshes every second.
 
-## Objectif
+## Goal
 
-- Afficher les conteneurs Docker dans une table lisible.
-- Rafraîchir automatiquement toutes les 1s.
-- Rester utilisable même si le terminal est petit (colonnes réduites, tronquées ou masquées).
+- Display Docker containers in a readable table.
+- Refresh automatically every second.
+- Stay usable even when the terminal is small (columns are resized, truncated, or hidden).
 
 ## Stack
 
 - .NET (`net10.0`)
 - [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui)
 
-## Lancer en développement
+## Run in development
 
 ```bash
 dotnet run --project DockerPsTui
 ```
 
-## Contrôles
+## Controls
 
-- `q` : quitter
-- `r` : forcer un rafraîchissement immédiat
+- `q`: quit
 
-## Comportement responsive
+## Responsive behavior
 
-- La table adapte les colonnes selon la largeur disponible.
-- En terminal étroit, seules les colonnes essentielles sont affichées.
-- Les valeurs trop longues sont tronquées avec `…` pour éviter la casse du layout.
+- The table adapts to the available width.
+- In narrow terminals, only essential columns are shown.
+- Long values are truncated with `…` to prevent layout breakage.
 
 ## Build
 
@@ -36,18 +35,18 @@ dotnet run --project DockerPsTui
 dotnet build DockerPsTui
 ```
 
-## Publier un exécutable Linux (single-file)
+## Publish a Linux executable (single-file)
 
 ```bash
 dotnet publish DockerPsTui -c Release -r linux-x64 --self-contained true /p:PublishSingleFile=true
 ```
 
-Binaire généré (exemple) :
+Generated binary (example):
 
 ```text
 DockerPsTui/bin/Release/net10.0/linux-x64/publish/DockerPsTui
 ```
 
-## Limites connues
+## Known limitations
 
-- Si `docker` n'est pas installé ou inaccessible (ex: permissions sur `/var/run/docker.sock`), l'application affiche l'erreur dans la fenêtre.
+- If `docker` is not installed or not accessible (for example due to `/var/run/docker.sock` permissions), the app shows the error in the window.
