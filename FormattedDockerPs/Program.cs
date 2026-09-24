@@ -57,6 +57,7 @@ string? volumeError = null;
 string? networkError = null;
 var lastRefresh = DateTime.Now;
 var refreshInProgress = false;
+var dockerCommandInProgress = false;
 
 void RefreshUi()
 {
@@ -66,39 +67,55 @@ void RefreshUi()
     }
 
     refreshInProgress = true;
-    try
+    _ = Task.Run(ReadDockerState).ContinueWith(task =>
     {
-        (rows, lastError) = ReadDockerPs();
-        (volumes, volumeError) = ReadDockerVolumes();
-        (networks, networkError) = ReadDockerNetworks();
-        lastRefresh = DateTime.Now;
+        Application.MainLoop?.Invoke(() =>
+        {
+            try
+            {
+                var state = task.IsCompletedSuccessfully
+                    ? task.Result
+                    : DockerState.WithError(task.Exception?.GetBaseException().Message ?? "Docker refresh failed");
+                ApplyDockerState(state);
+            }
+            finally
+            {
+                refreshInProgress = false;
+            }
+        });
+    }, TaskScheduler.Default);
+}
 
-        // Keep the scroll position while the periodic refresh replaces the content.
-        var contentOffset = scrollView.ContentOffset;
+void ApplyDockerState(DockerState state)
+{
+    rows = state.Containers;
+    volumes = state.Volumes;
+    networks = state.Networks;
+    lastError = state.ContainerError;
+    volumeError = state.VolumeError;
+    networkError = state.NetworkError;
+    lastRefresh = DateTime.Now;
 
-        tableView.Text = RenderTable(
-            rows,
-            volumes,
-            networks,
-            lastError,
-            volumeError,
-            networkError,
-            Math.Max(20, scrollView.Bounds.Width),
-            scrollView.Bounds.Height,
-            lastRefresh);
+    // Keep the scroll position while the periodic refresh replaces the content.
+    var contentOffset = scrollView.ContentOffset;
+    tableView.Text = RenderTable(
+        rows,
+        volumes,
+        networks,
+        lastError,
+        volumeError,
+        networkError,
+        Math.Max(20, scrollView.Bounds.Width),
+        scrollView.Bounds.Height,
+        lastRefresh);
 
-        var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
-        var contentHeight = layout.Network.NextSectionY + 1;
-        scrollView.ContentSize = new Size(Math.Max(20, scrollView.Bounds.Width), contentHeight);
-        tableView.Width = scrollView.ContentSize.Width;
-        tableView.Height = contentHeight;
-        RebuildActionButtons(rows, volumes, networks, lastError, volumeError, networkError, scrollView.ContentSize.Width, layout);
-        scrollView.ContentOffset = contentOffset;
-    }
-    finally
-    {
-        refreshInProgress = false;
-    }
+    var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
+    var contentHeight = layout.ContentHeight;
+    scrollView.ContentSize = new Size(Math.Max(20, scrollView.Bounds.Width), contentHeight);
+    tableView.Width = scrollView.ContentSize.Width;
+    tableView.Height = contentHeight;
+    RebuildActionButtons(rows, volumes, networks, lastError, volumeError, networkError, scrollView.ContentSize.Width, layout);
+    scrollView.ContentOffset = contentOffset;
 }
 
 void RebuildActionButtons(
@@ -162,6 +179,17 @@ void RebuildActionButtons(
             AddActionButton(deleteButton);
         }
     }
+
+    var allContainersAction = containers.Any(container => container.IsRunning) ? "Stop all" : "Start all";
+    var allContainersButton = new Button(16, layout.GlobalActionsY, allContainersAction) { ColorScheme = matrix };
+    EnableHoverHighlight(allContainersButton);
+    allContainersButton.Clicked += ToggleAllContainers;
+    AddActionButton(allContainersButton);
+
+    var purgeButton = new Button(29, layout.GlobalActionsY, "Purge all") { ColorScheme = matrix };
+    EnableHoverHighlight(purgeButton);
+    purgeButton.Clicked += PurgeAllDockerResources;
+    AddActionButton(purgeButton);
 }
 
 void AddActionButton(Button button)
@@ -185,16 +213,8 @@ void EnableHoverHighlight(Button button)
     };
 }
 
-void ExecuteContainerAction(ContainerRow container, string action)
-{
-    var error = RunDockerCommand(action, container.Id);
-    if (error is not null)
-    {
-        MessageBox.ErrorQuery("Docker action failed", error, "OK");
-    }
-
-    RefreshUi();
-}
+void ExecuteContainerAction(ContainerRow container, string action) =>
+    RunDockerWorkInBackground(() => RunDockerCommand(action, container.Id), "Docker action failed");
 
 void DeleteContainer(ContainerRow container)
 {
@@ -204,49 +224,102 @@ void DeleteContainer(ContainerRow container)
         "Delete",
         "Cancel");
 
-    if (confirmation != 0)
+    if (confirmation == 0)
     {
-        return;
+        RunDockerWorkInBackground(() => RunDockerCommand("rm", container.Id), "Docker delete failed");
     }
-
-    var error = RunDockerCommand("rm", container.Id);
-    if (error is not null)
-    {
-        MessageBox.ErrorQuery("Docker delete failed", error, "OK");
-    }
-
-    RefreshUi();
 }
 
+void ToggleAllContainers()
+{
+    var hasRunningContainer = rows.Any(container => container.IsRunning);
+    var targets = (hasRunningContainer ? rows.Where(container => container.IsRunning) : rows).ToList();
+    var action = hasRunningContainer ? "stop" : "start";
+    RunDockerWorkInBackground(
+        () => RunDockerCommands(targets.Select(container => new[] { action, container.Id })),
+        "Docker bulk action failed");
+}
+
+void PurgeAllDockerResources()
+{
+    var confirmation = MessageBox.Query(
+        "Purge Docker resources",
+        "Delete all containers, volumes, and user-defined networks? Containers are removed forcibly. Docker built-in networks are preserved.",
+        "Purge",
+        "Cancel");
+
+    if (confirmation == 0)
+    {
+        var containersToPurge = rows.ToList();
+        var volumesToPurge = volumes.ToList();
+        var networksToPurge = networks.Where(network => !network.IsBuiltIn).ToList();
+        RunDockerWorkInBackground(
+            () => PurgeDockerResources(containersToPurge, volumesToPurge, networksToPurge),
+            "Docker purge completed with errors");
+    }
+}
 
 void DeleteVolume(VolumeRow volume)
 {
-    if (MessageBox.Query("Delete volume", $"Delete '{volume.Name}'?", "Delete", "Cancel") != 0)
+    if (MessageBox.Query("Delete volume", $"Delete '{volume.Name}'?", "Delete", "Cancel") == 0)
     {
-        return;
+        RunDockerWorkInBackground(() => RunDockerCommand("volume", "rm", volume.Name), "Docker delete failed");
     }
-
-    ShowDockerError(RunDockerCommand("volume", "rm", volume.Name));
-    RefreshUi();
 }
 
 void DeleteNetwork(NetworkRow network)
 {
-    if (MessageBox.Query("Delete network", $"Delete '{network.Name}'?", "Delete", "Cancel") != 0)
+    if (MessageBox.Query("Delete network", $"Delete '{network.Name}'?", "Delete", "Cancel") == 0)
+    {
+        RunDockerWorkInBackground(() => RunDockerCommand("network", "rm", network.Id), "Docker delete failed");
+    }
+}
+
+void RunDockerWorkInBackground(Func<string?> work, string errorTitle)
+{
+    if (dockerCommandInProgress)
     {
         return;
     }
 
-    ShowDockerError(RunDockerCommand("network", "rm", network.Id));
-    RefreshUi();
+    dockerCommandInProgress = true;
+    _ = Task.Run(work).ContinueWith(task =>
+    {
+        Application.MainLoop?.Invoke(() =>
+        {
+            dockerCommandInProgress = false;
+            var error = task.IsCompletedSuccessfully
+                ? task.Result
+                : task.Exception?.GetBaseException().Message ?? "Docker command failed";
+            if (error is not null)
+            {
+                MessageBox.ErrorQuery(errorTitle, error, "OK");
+            }
+
+            RefreshUi();
+        });
+    }, TaskScheduler.Default);
 }
 
-void ShowDockerError(string? error)
+static string? RunDockerCommands(IEnumerable<string[]> commands)
 {
-    if (error is not null)
-    {
-        MessageBox.ErrorQuery("Docker delete failed", error, "OK");
-    }
+    var errors = commands
+        .Select(command => RunDockerCommand(command))
+        .Where(error => error is not null)
+        .Cast<string>()
+        .ToList();
+    return errors.Count == 0 ? null : string.Join(Environment.NewLine, errors);
+}
+
+static string? PurgeDockerResources(
+    IReadOnlyList<ContainerRow> containers,
+    IReadOnlyList<VolumeRow> volumes,
+    IReadOnlyList<NetworkRow> networks)
+{
+    var commands = containers.Select(container => new[] { "rm", "--force", container.Id })
+        .Concat(volumes.Select(volume => new[] { "volume", "rm", volume.Name }))
+        .Concat(networks.Select(network => new[] { "network", "rm", network.Id }));
+    return RunDockerCommands(commands);
 }
 
 // Refresh every second on the UI loop.
@@ -254,6 +327,24 @@ using var timer = new System.Threading.Timer(_ =>
 {
     Application.MainLoop?.Invoke(RefreshUi);
 }, null, dueTime: 0, period: RefreshIntervalMs);
+
+// Make the document scrollable with the mouse wheel even when a button has focus.
+Application.RootMouseEvent += mouseEvent =>
+{
+    if (mouseEvent.Handled)
+    {
+        return;
+    }
+
+    if ((mouseEvent.Flags & MouseFlags.WheeledUp) != 0)
+    {
+        mouseEvent.Handled = scrollView.ScrollUp(3);
+    }
+    else if ((mouseEvent.Flags & MouseFlags.WheeledDown) != 0)
+    {
+        mouseEvent.Handled = scrollView.ScrollDown(3);
+    }
+};
 
 // Handle quitting before the focused view can consume the key.
 Application.RootKeyEvent += keyEvent =>
@@ -272,6 +363,14 @@ window.Resized += _ => RefreshUi();
 
 Application.Run();
 Application.Shutdown();
+
+static DockerState ReadDockerState()
+{
+    var (containers, containerError) = ReadDockerPs();
+    var (volumes, volumeError) = ReadDockerVolumes();
+    var (networks, networkError) = ReadDockerNetworks();
+    return new DockerState(containers, volumes, networks, containerError, volumeError, networkError);
+}
 
 static (List<ContainerRow> Rows, string? Error) ReadDockerPs()
 {
@@ -425,7 +524,8 @@ static string RenderTable(
     AppendContainerTable(sb, rows, error, width);
     AppendResourceTable(sb, "VOLUMES", volumes.Select(volume => new[] { volume.Name, volume.Driver, volume.Scope }), volumeError, width);
     AppendResourceTable(sb, "NETWORKS", networks.Select(network => new[] { network.Name, network.Driver, network.Scope }), networkError, width);
-    sb.Append($"Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
+    sb.AppendLine($"Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
+    sb.Append("GLOBAL ACTIONS");
     return sb.ToString();
 }
 
@@ -674,16 +774,34 @@ static ColorScheme CreateButtonHoverScheme()
     };
 }
 
+sealed record DockerState(
+    List<ContainerRow> Containers,
+    List<VolumeRow> Volumes,
+    List<NetworkRow> Networks,
+    string? ContainerError,
+    string? VolumeError,
+    string? NetworkError)
+{
+    public static DockerState WithError(string error) => new([], [], [], error, error, error);
+}
+
 sealed record ContainerRow(string Id, string Image, string Status, string State, string Ports, string Name)
 {
     public bool IsRunning => State == "running";
 }
 sealed record VolumeRow(string Name, string Driver, string Scope);
-sealed record NetworkRow(string Id, string Name, string Driver, string Scope);
+sealed record NetworkRow(string Id, string Name, string Driver, string Scope)
+{
+    public bool IsBuiltIn => Name is "bridge" or "host" or "none";
+}
 sealed record TableLayout(int StartY, int DisplayedRowCount)
 {
     public int FirstDataRowY => StartY + 4;
     public int NextSectionY => StartY + 5 + DisplayedRowCount;
 }
-sealed record TablesLayout(TableLayout Containers, TableLayout Volumes, TableLayout Network);
+sealed record TablesLayout(TableLayout Containers, TableLayout Volumes, TableLayout Network)
+{
+    public int GlobalActionsY => Network.NextSectionY + 1;
+    public int ContentHeight => GlobalActionsY + 1;
+}
 sealed record Column(string Header, int MinWidth, Func<ContainerRow, string> Value);
