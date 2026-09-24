@@ -41,7 +41,7 @@ docker-ps
 
 ## Controls
 
-- `q`: quit
+- `shift`+`q`: quit
 
 ## Responsive behavior
 

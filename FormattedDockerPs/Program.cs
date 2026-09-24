@@ -52,12 +52,22 @@ void RefreshUi()
         (rows, lastError) = ReadDockerPs();
         lastRefresh = DateTime.Now;
 
+        // Setting Text resets TextView navigation state. Keep the user's position
+        // so that the periodic refresh does not move the cursor or scroll offset.
+        var cursorPosition = tableView.CursorPosition;
+        var topRow = tableView.TopRow;
+        var leftColumn = tableView.LeftColumn;
+
         tableView.Text = RenderTable(
             rows,
             lastError,
             tableView.Bounds.Width,
             tableView.Bounds.Height,
             lastRefresh);
+
+        tableView.CursorPosition = cursorPosition;
+        tableView.TopRow = topRow;
+        tableView.LeftColumn = leftColumn;
     }
     finally
     {
@@ -71,14 +81,17 @@ using var timer = new System.Threading.Timer(_ =>
     Application.MainLoop?.Invoke(RefreshUi);
 }, null, dueTime: 0, period: RefreshIntervalMs);
 
-// Keep controls intentionally minimal.
-window.KeyPress += args =>
+// Handle quitting before the focused view can consume the key.
+Application.RootKeyEvent += keyEvent =>
 {
-    if (args.KeyEvent.Key == Key.Q || args.KeyEvent.Key == (Key.CtrlMask | Key.Q))
+    if (keyEvent.Key == Key.Q)
     {
         Application.RequestStop();
-        args.Handled = true;
+        return true;
     }
+
+    // Ctrl+Q is deliberately ignored; q is the sole quit shortcut.
+    return keyEvent.Key == (Key.CtrlMask | Key.Q);
 };
 
 window.Resized += _ => RefreshUi();
@@ -175,7 +188,7 @@ static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int w
     }
 
     sb.AppendLine(HRule(columnWidths));
-    sb.Append($"Containers: {rows.Count} | Refresh: {refreshedAt:HH:mm:ss} | q: quit");
+    sb.Append($"Containers: {rows.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
 
     return sb.ToString();
 }
