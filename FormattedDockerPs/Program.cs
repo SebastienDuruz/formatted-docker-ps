@@ -7,6 +7,7 @@ const int RefreshIntervalMs = 1000;
 // App setup
 Application.Init();
 var matrix = CreateMatrixScheme();
+var buttonHover = CreateButtonHoverScheme();
 
 var top = Application.Top;
 top.ColorScheme = matrix;
@@ -35,6 +36,7 @@ window.Add(tableView);
 top.Add(window);
 
 var rows = new List<ContainerRow>();
+var actionButtons = new List<Button>();
 string? lastError = null;
 var lastRefresh = DateTime.Now;
 var refreshInProgress = false;
@@ -65,6 +67,8 @@ void RefreshUi()
             tableView.Bounds.Height,
             lastRefresh);
 
+        RebuildActionButtons(rows, lastError, tableView.Bounds.Width, tableView.Bounds.Height);
+
         tableView.CursorPosition = cursorPosition;
         tableView.TopRow = topRow;
         tableView.LeftColumn = leftColumn;
@@ -73,6 +77,99 @@ void RefreshUi()
     {
         refreshInProgress = false;
     }
+}
+
+void RebuildActionButtons(IReadOnlyList<ContainerRow> containers, string? error, int width, int height)
+{
+    foreach (var button in actionButtons)
+    {
+        window.Remove(button);
+    }
+
+    actionButtons.Clear();
+
+    var columns = PickColumns(width);
+    var actionColumnIndex = Array.FindIndex(columns, column => column.Header == "ACTIONS");
+    if (actionColumnIndex < 0)
+    {
+        return;
+    }
+
+    var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), Math.Max(20, width));
+    var actionColumnX = 1 + columnWidths.Take(actionColumnIndex).Sum(columnWidth => columnWidth + 3) + 1;
+    var maxRows = GetMaxRows(height, error);
+    var firstRowY = 3 + (string.IsNullOrWhiteSpace(error) ? 0 : 2);
+
+    foreach (var (container, index) in containers.Take(maxRows).Select((container, index) => (container, index)))
+    {
+        var action = container.IsRunning ? "Stop" : "Start";
+        var actionButton = new Button(actionColumnX, firstRowY + index, action)
+        {
+            ColorScheme = matrix,
+        };
+        EnableHoverHighlight(actionButton);
+        actionButton.Clicked += () => ExecuteContainerAction(container, action.ToLowerInvariant());
+
+        var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, firstRowY + index, "Delete")
+        {
+            ColorScheme = matrix,
+        };
+        EnableHoverHighlight(deleteButton);
+        deleteButton.Clicked += () => DeleteContainer(container);
+
+        window.Add(deleteButton);
+        actionButtons.Add(deleteButton);
+        window.Add(actionButton);
+        actionButtons.Add(actionButton);
+    }
+}
+
+void EnableHoverHighlight(Button button)
+{
+    button.MouseEnter += _ =>
+    {
+        button.ColorScheme = buttonHover;
+        button.SetNeedsDisplay();
+    };
+
+    button.MouseLeave += _ =>
+    {
+        button.ColorScheme = matrix;
+        button.SetNeedsDisplay();
+    };
+}
+
+void ExecuteContainerAction(ContainerRow container, string action)
+{
+    var error = RunDockerCommand(action, container.Id);
+    if (error is not null)
+    {
+        MessageBox.ErrorQuery("Docker action failed", error, "OK");
+    }
+
+    RefreshUi();
+}
+
+void DeleteContainer(ContainerRow container)
+{
+    var confirmation = MessageBox.Query(
+        "Delete container",
+        $"Delete '{container.Name}'? A running container must be stopped first.",
+        "Delete",
+        "Cancel");
+
+    if (confirmation != 0)
+    {
+        return;
+    }
+
+    var error = RunDockerCommand("rm", container.Id);
+    if (error is not null)
+    {
+        MessageBox.ErrorQuery("Docker delete failed", error, "OK");
+    }
+
+    RefreshUi();
 }
 
 // Refresh every second on the UI loop.
@@ -110,9 +207,10 @@ static (List<ContainerRow> Rows, string? Error) ReadDockerPs()
     };
 
     psi.ArgumentList.Add("ps");
+    psi.ArgumentList.Add("--all");
     psi.ArgumentList.Add("--no-trunc");
     psi.ArgumentList.Add("--format");
-    psi.ArgumentList.Add("{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}");
+    psi.ArgumentList.Add("{{.ID}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.Ports}}\t{{.Names}}");
 
     using var process = new Process { StartInfo = psi };
 
@@ -138,15 +236,52 @@ static (List<ContainerRow> Rows, string? Error) ReadDockerPs()
     foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
     {
         var cols = line.Split('\t');
-        if (cols.Length < 5)
+        if (cols.Length < 6)
         {
             continue;
         }
 
-        parsed.Add(new ContainerRow(cols[0], cols[1], cols[2], cols[3], cols[4]));
+        parsed.Add(new ContainerRow(cols[0], cols[1], cols[2], cols[3], cols[4], cols[5]));
     }
 
     return (parsed, null);
+}
+
+static string? RunDockerCommand(string action, string containerId)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = "docker",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+
+    psi.ArgumentList.Add(action);
+    psi.ArgumentList.Add(containerId);
+
+    using var process = new Process { StartInfo = psi };
+    try
+    {
+        process.Start();
+    }
+    catch (Exception ex)
+    {
+        return $"Unable to start docker: {ex.Message}";
+    }
+
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+
+    if (process.ExitCode == 0)
+    {
+        return null;
+    }
+
+    return string.IsNullOrWhiteSpace(stderr)
+        ? string.IsNullOrWhiteSpace(stdout) ? $"docker {action} failed" : stdout.Trim()
+        : stderr.Trim();
 }
 
 static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int width, int height, DateTime refreshedAt)
@@ -169,7 +304,7 @@ static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int w
     sb.AppendLine(RenderRow(columns.Select(c => c.Header).ToArray(), columnWidths));
     sb.AppendLine(HRule(columnWidths));
 
-    var maxRows = Math.Max(1, height - 6 - (string.IsNullOrWhiteSpace(error) ? 0 : 2));
+    var maxRows = GetMaxRows(height, error);
     var visible = rows.Take(maxRows).ToList();
 
     foreach (var row in visible)
@@ -180,7 +315,7 @@ static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int w
 
     if (visible.Count == 0)
     {
-        sb.AppendLine(RenderMessageRow(columnWidths, "No running containers"));
+        sb.AppendLine(RenderMessageRow(columnWidths, "No containers"));
     }
     else if (rows.Count > visible.Count)
     {
@@ -202,6 +337,7 @@ static Column[] PickColumns(int width)
         [
             new("NAME", 10, r => r.Name),
             new("STATUS", 8, r => r.Status),
+            new("ACTIONS", 15, _ => string.Empty),
         ];
     }
 
@@ -212,6 +348,7 @@ static Column[] PickColumns(int width)
             new("NAME", 12, r => r.Name),
             new("STATUS", 10, r => r.Status),
             new("ID", 8, r => r.Id),
+            new("ACTIONS", 15, _ => string.Empty),
         ];
     }
 
@@ -223,6 +360,7 @@ static Column[] PickColumns(int width)
             new("STATUS", 10, r => r.Status),
             new("ID", 8, r => r.Id),
             new("IMAGE", 12, r => r.Image),
+            new("ACTIONS", 15, _ => string.Empty),
         ];
     }
 
@@ -233,8 +371,12 @@ static Column[] PickColumns(int width)
         new("ID", 8, r => r.Id),
         new("IMAGE", 12, r => r.Image),
         new("PORTS", 12, r => r.Ports),
+        new("ACTIONS", 15, _ => string.Empty),
     ];
 }
+
+static int GetMaxRows(int height, string? error) =>
+    Math.Max(1, Math.Max(6, height) - 6 - (string.IsNullOrWhiteSpace(error) ? 0 : 2));
 
 static int[] ComputeWidths(int[] minWidths, int totalWidth)
 {
@@ -342,5 +484,22 @@ static ColorScheme CreateMatrixScheme()
     return scheme;
 }
 
-sealed record ContainerRow(string Id, string Image, string Status, string Ports, string Name);
+static ColorScheme CreateButtonHoverScheme()
+{
+    var highlighted = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightGreen);
+
+    return new ColorScheme
+    {
+        Normal = highlighted,
+        Focus = highlighted,
+        HotNormal = highlighted,
+        HotFocus = highlighted,
+        Disabled = highlighted,
+    };
+}
+
+sealed record ContainerRow(string Id, string Image, string Status, string State, string Ports, string Name)
+{
+    public bool IsRunning => State == "running";
+}
 sealed record Column(string Header, int MinWidth, Func<ContainerRow, string> Value);
