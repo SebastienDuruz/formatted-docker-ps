@@ -21,6 +21,17 @@ var window = new Window("Docker PS Monitor")
     ColorScheme = matrix,
 };
 
+var scrollView = new ScrollView
+{
+    X = 0,
+    Y = 0,
+    Width = Dim.Fill(),
+    Height = Dim.Fill(),
+    CanFocus = true,
+    AutoHideScrollBars = true,
+    ShowVerticalScrollIndicator = true,
+};
+
 var tableView = new TextView
 {
     X = 0,
@@ -28,16 +39,22 @@ var tableView = new TextView
     Width = Dim.Fill(),
     Height = Dim.Fill(),
     ReadOnly = true,
+    CanFocus = false,
     WordWrap = false,
     ColorScheme = matrix,
 };
 
-window.Add(tableView);
+scrollView.Add(tableView);
+window.Add(scrollView);
 top.Add(window);
 
 var rows = new List<ContainerRow>();
+var volumes = new List<VolumeRow>();
+var networks = new List<NetworkRow>();
 var actionButtons = new List<Button>();
 string? lastError = null;
+string? volumeError = null;
+string? networkError = null;
 var lastRefresh = DateTime.Now;
 var refreshInProgress = false;
 
@@ -52,26 +69,31 @@ void RefreshUi()
     try
     {
         (rows, lastError) = ReadDockerPs();
+        (volumes, volumeError) = ReadDockerVolumes();
+        (networks, networkError) = ReadDockerNetworks();
         lastRefresh = DateTime.Now;
 
-        // Setting Text resets TextView navigation state. Keep the user's position
-        // so that the periodic refresh does not move the cursor or scroll offset.
-        var cursorPosition = tableView.CursorPosition;
-        var topRow = tableView.TopRow;
-        var leftColumn = tableView.LeftColumn;
+        // Keep the scroll position while the periodic refresh replaces the content.
+        var contentOffset = scrollView.ContentOffset;
 
         tableView.Text = RenderTable(
             rows,
+            volumes,
+            networks,
             lastError,
-            tableView.Bounds.Width,
-            tableView.Bounds.Height,
+            volumeError,
+            networkError,
+            Math.Max(20, scrollView.Bounds.Width),
+            scrollView.Bounds.Height,
             lastRefresh);
 
-        RebuildActionButtons(rows, lastError, tableView.Bounds.Width, tableView.Bounds.Height);
-
-        tableView.CursorPosition = cursorPosition;
-        tableView.TopRow = topRow;
-        tableView.LeftColumn = leftColumn;
+        var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
+        var contentHeight = layout.Network.NextSectionY + 1;
+        scrollView.ContentSize = new Size(Math.Max(20, scrollView.Bounds.Width), contentHeight);
+        tableView.Width = scrollView.ContentSize.Width;
+        tableView.Height = contentHeight;
+        RebuildActionButtons(rows, volumes, networks, lastError, volumeError, networkError, scrollView.ContentSize.Width, layout);
+        scrollView.ContentOffset = contentOffset;
     }
     finally
     {
@@ -79,49 +101,73 @@ void RefreshUi()
     }
 }
 
-void RebuildActionButtons(IReadOnlyList<ContainerRow> containers, string? error, int width, int height)
+void RebuildActionButtons(
+    IReadOnlyList<ContainerRow> containers,
+    IReadOnlyList<VolumeRow> volumeRows,
+    IReadOnlyList<NetworkRow> networkRows,
+    string? error,
+    string? volumesError,
+    string? networksError,
+    int width,
+    TablesLayout layout)
 {
     foreach (var button in actionButtons)
     {
-        window.Remove(button);
+        scrollView.Remove(button);
     }
 
     actionButtons.Clear();
 
-    var columns = PickColumns(width);
-    var actionColumnIndex = Array.FindIndex(columns, column => column.Header == "ACTIONS");
-    if (actionColumnIndex < 0)
+    if (string.IsNullOrWhiteSpace(error))
     {
-        return;
+        var columns = PickColumns(width);
+        var actionColumnIndex = Array.FindIndex(columns, column => column.Header == "ACTIONS");
+        var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), Math.Max(20, width));
+        var actionColumnX = 1 + columnWidths.Take(actionColumnIndex).Sum(columnWidth => columnWidth + 3) + 1;
+
+        foreach (var (container, index) in containers.Select((container, index) => (container, index)))
+        {
+            var action = container.IsRunning ? "Stop" : "Start";
+            var actionButton = new Button(actionColumnX, layout.Containers.FirstDataRowY + index, action) { ColorScheme = matrix };
+            EnableHoverHighlight(actionButton);
+            actionButton.Clicked += () => ExecuteContainerAction(container, action.ToLowerInvariant());
+
+            var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, layout.Containers.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            EnableHoverHighlight(deleteButton);
+            deleteButton.Clicked += () => DeleteContainer(container);
+            AddActionButton(actionButton);
+            AddActionButton(deleteButton);
+        }
     }
 
-    var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), Math.Max(20, width));
-    var actionColumnX = 1 + columnWidths.Take(actionColumnIndex).Sum(columnWidth => columnWidth + 3) + 1;
-    var maxRows = GetMaxRows(height, error);
-    var firstRowY = 3 + (string.IsNullOrWhiteSpace(error) ? 0 : 2);
-
-    foreach (var (container, index) in containers.Take(maxRows).Select((container, index) => (container, index)))
+    var resourceActionX = GetResourceActionX(width);
+    if (string.IsNullOrWhiteSpace(volumesError))
     {
-        var action = container.IsRunning ? "Stop" : "Start";
-        var actionButton = new Button(actionColumnX, firstRowY + index, action)
+        foreach (var (volume, index) in volumeRows.Select((volume, index) => (volume, index)))
         {
-            ColorScheme = matrix,
-        };
-        EnableHoverHighlight(actionButton);
-        actionButton.Clicked += () => ExecuteContainerAction(container, action.ToLowerInvariant());
-
-        var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, firstRowY + index, "Delete")
-        {
-            ColorScheme = matrix,
-        };
-        EnableHoverHighlight(deleteButton);
-        deleteButton.Clicked += () => DeleteContainer(container);
-
-        window.Add(deleteButton);
-        actionButtons.Add(deleteButton);
-        window.Add(actionButton);
-        actionButtons.Add(actionButton);
+            var deleteButton = new Button(resourceActionX, layout.Volumes.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            EnableHoverHighlight(deleteButton);
+            deleteButton.Clicked += () => DeleteVolume(volume);
+            AddActionButton(deleteButton);
+        }
     }
+
+    if (string.IsNullOrWhiteSpace(networksError))
+    {
+        foreach (var (network, index) in networkRows.Select((network, index) => (network, index)))
+        {
+            var deleteButton = new Button(resourceActionX, layout.Network.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            EnableHoverHighlight(deleteButton);
+            deleteButton.Clicked += () => DeleteNetwork(network);
+            AddActionButton(deleteButton);
+        }
+    }
+}
+
+void AddActionButton(Button button)
+{
+    scrollView.Add(button);
+    actionButtons.Add(button);
 }
 
 void EnableHoverHighlight(Button button)
@@ -170,6 +216,37 @@ void DeleteContainer(ContainerRow container)
     }
 
     RefreshUi();
+}
+
+
+void DeleteVolume(VolumeRow volume)
+{
+    if (MessageBox.Query("Delete volume", $"Delete '{volume.Name}'?", "Delete", "Cancel") != 0)
+    {
+        return;
+    }
+
+    ShowDockerError(RunDockerCommand("volume", "rm", volume.Name));
+    RefreshUi();
+}
+
+void DeleteNetwork(NetworkRow network)
+{
+    if (MessageBox.Query("Delete network", $"Delete '{network.Name}'?", "Delete", "Cancel") != 0)
+    {
+        return;
+    }
+
+    ShowDockerError(RunDockerCommand("network", "rm", network.Id));
+    RefreshUi();
+}
+
+void ShowDockerError(string? error)
+{
+    if (error is not null)
+    {
+        MessageBox.ErrorQuery("Docker delete failed", error, "OK");
+    }
 }
 
 // Refresh every second on the UI loop.
@@ -247,18 +324,48 @@ static (List<ContainerRow> Rows, string? Error) ReadDockerPs()
     return (parsed, null);
 }
 
-static string? RunDockerCommand(string action, string containerId)
+static (List<VolumeRow> Rows, string? Error) ReadDockerVolumes()
 {
-    var psi = new ProcessStartInfo
-    {
-        FileName = "docker",
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-    };
+    var (stdout, error) = RunDockerRead("volume", "ls", "--format", "{{.Name}}\t{{.Driver}}\t{{.Scope}}");
+    if (error is not null) return ([], error);
 
-    psi.ArgumentList.Add(action);
-    psi.ArgumentList.Add(containerId);
+    return (stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        .Select(line => line.Split('\t'))
+        .Where(columns => columns.Length >= 3)
+        .Select(columns => new VolumeRow(columns[0], columns[1], columns[2]))
+        .ToList(), null);
+}
+
+static (List<NetworkRow> Rows, string? Error) ReadDockerNetworks()
+{
+    var (stdout, error) = RunDockerRead("network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}");
+    if (error is not null) return ([], error);
+
+    return (stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+        .Select(line => line.Split('\t'))
+        .Where(columns => columns.Length >= 4)
+        .Select(columns => new NetworkRow(columns[0], columns[1], columns[2], columns[3]))
+        .ToList(), null);
+}
+
+static (string Output, string? Error) RunDockerRead(params string[] arguments)
+{
+    var psi = CreateDockerProcess(arguments);
+    using var process = new Process { StartInfo = psi };
+    try { process.Start(); }
+    catch (Exception ex) { return (string.Empty, $"Unable to start docker: {ex.Message}"); }
+
+    var stdout = process.StandardOutput.ReadToEnd();
+    var stderr = process.StandardError.ReadToEnd();
+    process.WaitForExit();
+    return process.ExitCode == 0
+        ? (stdout, null)
+        : (string.Empty, string.IsNullOrWhiteSpace(stderr) ? "docker list failed" : stderr.Trim());
+}
+
+static string? RunDockerCommand(params string[] arguments)
+{
+    var psi = CreateDockerProcess(arguments);
 
     using var process = new Process { StartInfo = psi };
     try
@@ -280,52 +387,124 @@ static string? RunDockerCommand(string action, string containerId)
     }
 
     return string.IsNullOrWhiteSpace(stderr)
-        ? string.IsNullOrWhiteSpace(stdout) ? $"docker {action} failed" : stdout.Trim()
+        ? string.IsNullOrWhiteSpace(stdout) ? $"docker {string.Join(' ', arguments.Take(2))} failed" : stdout.Trim()
         : stderr.Trim();
 }
 
-static string RenderTable(IReadOnlyList<ContainerRow> rows, string? error, int width, int height, DateTime refreshedAt)
+static ProcessStartInfo CreateDockerProcess(IEnumerable<string> arguments)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = "docker",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+    };
+
+    foreach (var argument in arguments)
+    {
+        psi.ArgumentList.Add(argument);
+    }
+
+    return psi;
+}
+
+static string RenderTable(
+    IReadOnlyList<ContainerRow> rows,
+    IReadOnlyList<VolumeRow> volumes,
+    IReadOnlyList<NetworkRow> networks,
+    string? error,
+    string? volumeError,
+    string? networkError,
+    int width,
+    int height,
+    DateTime refreshedAt)
 {
     width = Math.Max(20, width);
-    height = Math.Max(6, height);
-
-    var columns = PickColumns(width);
-    var columnWidths = ComputeWidths(columns.Select(c => c.MinWidth).ToArray(), width);
-
     var sb = new StringBuilder();
+    AppendContainerTable(sb, rows, error, width);
+    AppendResourceTable(sb, "VOLUMES", volumes.Select(volume => new[] { volume.Name, volume.Driver, volume.Scope }), volumeError, width);
+    AppendResourceTable(sb, "NETWORKS", networks.Select(network => new[] { network.Name, network.Driver, network.Scope }), networkError, width);
+    sb.Append($"Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
+    return sb.ToString();
+}
+
+static void AppendContainerTable(StringBuilder sb, IReadOnlyList<ContainerRow> rows, string? error, int width)
+{
+    var columns = PickColumns(width);
+    var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), width);
+    sb.AppendLine("CONTAINERS");
+    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(RenderRow(columns.Select(column => column.Header).ToArray(), columnWidths));
+    sb.AppendLine(HRule(columnWidths));
 
     if (!string.IsNullOrWhiteSpace(error))
     {
-        sb.AppendLine($"ERROR: {error}");
-        sb.AppendLine();
+        sb.AppendLine(RenderMessageRow(columnWidths, $"ERROR: {error}"));
     }
-
-    sb.AppendLine(HRule(columnWidths));
-    sb.AppendLine(RenderRow(columns.Select(c => c.Header).ToArray(), columnWidths));
-    sb.AppendLine(HRule(columnWidths));
-
-    var maxRows = GetMaxRows(height, error);
-    var visible = rows.Take(maxRows).ToList();
-
-    foreach (var row in visible)
-    {
-        var values = columns.Select(c => c.Value(row)).ToArray();
-        sb.AppendLine(RenderRow(values, columnWidths));
-    }
-
-    if (visible.Count == 0)
+    else if (rows.Count == 0)
     {
         sb.AppendLine(RenderMessageRow(columnWidths, "No containers"));
     }
-    else if (rows.Count > visible.Count)
+    else
     {
-        sb.AppendLine(RenderMessageRow(columnWidths, $"... {rows.Count - visible.Count} hidden row(s) ..."));
+        foreach (var row in rows)
+        {
+            sb.AppendLine(RenderRow(columns.Select(column => column.Value(row)).ToArray(), columnWidths));
+        }
     }
 
     sb.AppendLine(HRule(columnWidths));
-    sb.Append($"Containers: {rows.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
+}
 
-    return sb.ToString();
+static void AppendResourceTable(StringBuilder sb, string title, IEnumerable<string[]> rows, string? error, int width)
+{
+    var columnWidths = ComputeWidths([12, 10, 8, 15], Math.Max(20, width));
+    var resourceRows = rows.ToList();
+    sb.AppendLine(title);
+    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(RenderRow(["NAME", "DRIVER", "SCOPE", "ACTIONS"], columnWidths));
+    sb.AppendLine(HRule(columnWidths));
+
+    if (!string.IsNullOrWhiteSpace(error))
+    {
+        sb.AppendLine(RenderMessageRow(columnWidths, $"ERROR: {error}"));
+    }
+    else if (resourceRows.Count == 0)
+    {
+        sb.AppendLine(RenderMessageRow(columnWidths, $"No {title.ToLowerInvariant()}"));
+    }
+    else
+    {
+        foreach (var row in resourceRows)
+        {
+            sb.AppendLine(RenderRow([row[0], row[1], row[2], string.Empty], columnWidths));
+        }
+    }
+
+    sb.AppendLine(HRule(columnWidths));
+}
+
+static TablesLayout GetTableLayout(
+    IReadOnlyList<ContainerRow> containers,
+    IReadOnlyList<VolumeRow> volumes,
+    IReadOnlyList<NetworkRow> networks,
+    string? containerError,
+    string? volumeError,
+    string? networkError)
+{
+    var containerLayout = new TableLayout(0, GetDisplayedRowCount(containers.Count, containerError));
+    var volumeLayout = new TableLayout(containerLayout.NextSectionY, GetDisplayedRowCount(volumes.Count, volumeError));
+    var networkLayout = new TableLayout(volumeLayout.NextSectionY, GetDisplayedRowCount(networks.Count, networkError));
+    return new TablesLayout(containerLayout, volumeLayout, networkLayout);
+}
+
+static int GetDisplayedRowCount(int count, string? error) => string.IsNullOrWhiteSpace(error) ? Math.Max(1, count) : 1;
+
+static int GetResourceActionX(int width)
+{
+    var columnWidths = ComputeWidths([12, 10, 8, 15], Math.Max(20, width));
+    return columnWidths.Take(3).Sum() + 11;
 }
 
 // Small terminals show fewer columns instead of breaking layout.
@@ -374,9 +553,6 @@ static Column[] PickColumns(int width)
         new("ACTIONS", 15, _ => string.Empty),
     ];
 }
-
-static int GetMaxRows(int height, string? error) =>
-    Math.Max(1, Math.Max(6, height) - 6 - (string.IsNullOrWhiteSpace(error) ? 0 : 2));
 
 static int[] ComputeWidths(int[] minWidths, int totalWidth)
 {
@@ -502,4 +678,12 @@ sealed record ContainerRow(string Id, string Image, string Status, string State,
 {
     public bool IsRunning => State == "running";
 }
+sealed record VolumeRow(string Name, string Driver, string Scope);
+sealed record NetworkRow(string Id, string Name, string Driver, string Scope);
+sealed record TableLayout(int StartY, int DisplayedRowCount)
+{
+    public int FirstDataRowY => StartY + 4;
+    public int NextSectionY => StartY + 5 + DisplayedRowCount;
+}
+sealed record TablesLayout(TableLayout Containers, TableLayout Volumes, TableLayout Network);
 sealed record Column(string Header, int MinWidth, Func<ContainerRow, string> Value);
