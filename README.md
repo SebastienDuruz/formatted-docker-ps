@@ -42,6 +42,8 @@ docker-ps
 ## Controls
 
 - `shift`+`q`: quit
+- `Tab` / `Shift`+`Tab`: move between action buttons
+- `Enter` or `Space`: activate the focused button
 
 ## Responsive behavior
 

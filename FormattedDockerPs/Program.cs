@@ -7,6 +7,7 @@ const int RefreshIntervalMs = 1000;
 // App setup
 Application.Init();
 var matrix = CreateMatrixScheme();
+var buttonScheme = CreateButtonScheme();
 var buttonHover = CreateButtonHoverScheme();
 
 var top = Application.Top;
@@ -29,6 +30,7 @@ var scrollView = new ScrollView
     Height = Dim.Fill(),
     CanFocus = true,
     AutoHideScrollBars = true,
+    ShowHorizontalScrollIndicator = false,
     ShowVerticalScrollIndicator = true,
 };
 
@@ -96,8 +98,18 @@ void ApplyDockerState(DockerState state)
     networkError = state.NetworkError;
     lastRefresh = DateTime.Now;
 
-    // Keep the scroll position while the periodic refresh replaces the content.
+    // Keep the vertical scroll position while the periodic refresh replaces the content.
     var contentOffset = scrollView.ContentOffset;
+    contentOffset.X = 0;
+    var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
+    var contentHeight = layout.ContentHeight;
+    // The vertical indicator consumes one column. Reserve it before sizing the
+    // content; otherwise the content is one column too wide and ScrollView adds
+    // a horizontal scrollbar.
+    var visibleContentWidth = Math.Max(
+        1,
+        scrollView.Bounds.Width - (contentHeight > scrollView.Bounds.Height ? 1 : 0));
+
     tableView.Text = RenderTable(
         rows,
         volumes,
@@ -105,13 +117,11 @@ void ApplyDockerState(DockerState state)
         lastError,
         volumeError,
         networkError,
-        Math.Max(20, scrollView.Bounds.Width),
+        visibleContentWidth,
         scrollView.Bounds.Height,
         lastRefresh);
 
-    var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
-    var contentHeight = layout.ContentHeight;
-    scrollView.ContentSize = new Size(Math.Max(20, scrollView.Bounds.Width), contentHeight);
+    scrollView.ContentSize = new Size(visibleContentWidth, contentHeight);
     tableView.Width = scrollView.ContentSize.Width;
     tableView.Height = contentHeight;
     RebuildActionButtons(rows, volumes, networks, lastError, volumeError, networkError, scrollView.ContentSize.Width, layout);
@@ -128,6 +138,10 @@ void RebuildActionButtons(
     int width,
     TablesLayout layout)
 {
+    // The content is refreshed every second. Remember the focused button so a
+    // keyboard user does not lose their place whenever the controls are rebuilt.
+    var focusedButtonIndex = actionButtons.FindIndex(button => button.HasFocus);
+
     foreach (var button in actionButtons)
     {
         scrollView.Remove(button);
@@ -145,11 +159,11 @@ void RebuildActionButtons(
         foreach (var (container, index) in containers.Select((container, index) => (container, index)))
         {
             var action = container.IsRunning ? "Stop" : "Start";
-            var actionButton = new Button(actionColumnX, layout.Containers.FirstDataRowY + index, action) { ColorScheme = matrix };
+            var actionButton = new Button(actionColumnX, layout.Containers.FirstDataRowY + index, action) { ColorScheme = buttonScheme };
             EnableHoverHighlight(actionButton);
             actionButton.Clicked += () => ExecuteContainerAction(container, action.ToLowerInvariant());
 
-            var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, layout.Containers.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, layout.Containers.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
             EnableHoverHighlight(deleteButton);
             deleteButton.Clicked += () => DeleteContainer(container);
             AddActionButton(actionButton);
@@ -162,7 +176,7 @@ void RebuildActionButtons(
     {
         foreach (var (volume, index) in volumeRows.Select((volume, index) => (volume, index)))
         {
-            var deleteButton = new Button(resourceActionX, layout.Volumes.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            var deleteButton = new Button(resourceActionX, layout.Volumes.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
             EnableHoverHighlight(deleteButton);
             deleteButton.Clicked += () => DeleteVolume(volume);
             AddActionButton(deleteButton);
@@ -173,7 +187,7 @@ void RebuildActionButtons(
     {
         foreach (var (network, index) in networkRows.Select((network, index) => (network, index)))
         {
-            var deleteButton = new Button(resourceActionX, layout.Network.FirstDataRowY + index, "Delete") { ColorScheme = matrix };
+            var deleteButton = new Button(resourceActionX, layout.Network.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
             EnableHoverHighlight(deleteButton);
             deleteButton.Clicked += () => DeleteNetwork(network);
             AddActionButton(deleteButton);
@@ -181,19 +195,28 @@ void RebuildActionButtons(
     }
 
     var allContainersAction = containers.Any(container => container.IsRunning) ? "Stop all" : "Start all";
-    var allContainersButton = new Button(16, layout.GlobalActionsY, allContainersAction) { ColorScheme = matrix };
+    var allContainersButton = new Button(16, layout.GlobalActionsY, allContainersAction) { ColorScheme = buttonScheme };
     EnableHoverHighlight(allContainersButton);
     allContainersButton.Clicked += ToggleAllContainers;
     AddActionButton(allContainersButton);
 
-    var purgeButton = new Button(29, layout.GlobalActionsY, "Purge all") { ColorScheme = matrix };
+    var purgeButton = new Button(29, layout.GlobalActionsY, "Purge all") { ColorScheme = buttonScheme };
     EnableHoverHighlight(purgeButton);
     purgeButton.Clicked += PurgeAllDockerResources;
     AddActionButton(purgeButton);
+
+    if (focusedButtonIndex >= 0 && focusedButtonIndex < actionButtons.Count)
+    {
+        actionButtons[focusedButtonIndex].SetFocus();
+    }
 }
 
 void AddActionButton(Button button)
 {
+    // ScrollView is focusable for scrolling, so opt buttons into the tab order
+    // explicitly. Button then provides its normal Enter/Space activation.
+    button.CanFocus = true;
+    button.TabStop = true;
     scrollView.Add(button);
     actionButtons.Add(button);
 }
@@ -208,7 +231,7 @@ void EnableHoverHighlight(Button button)
 
     button.MouseLeave += _ =>
     {
-        button.ColorScheme = matrix;
+        button.ColorScheme = buttonScheme;
         button.SetNeedsDisplay();
     };
 }
@@ -355,9 +378,56 @@ Application.RootKeyEvent += keyEvent =>
         return true;
     }
 
+    if (keyEvent.Key == Key.Tab || keyEvent.Key == (Key.ShiftMask | Key.Tab))
+    {
+        FocusNextActionButton(keyEvent.Key == (Key.ShiftMask | Key.Tab));
+        return true;
+    }
+
     // Ctrl+Q is deliberately ignored; q is the sole quit shortcut.
     return keyEvent.Key == (Key.CtrlMask | Key.Q);
 };
+
+void FocusNextActionButton(bool reverse)
+{
+    if (actionButtons.Count == 0)
+    {
+        return;
+    }
+
+    var focusedIndex = actionButtons.FindIndex(button => button.HasFocus);
+    var nextIndex = focusedIndex < 0
+        ? (reverse ? actionButtons.Count - 1 : 0)
+        : (focusedIndex + (reverse ? -1 : 1) + actionButtons.Count) % actionButtons.Count;
+    var nextButton = actionButtons[nextIndex];
+    nextButton.SetFocus();
+    ScrollIntoView(nextButton);
+}
+
+void ScrollIntoView(View view)
+{
+    var offset = scrollView.ContentOffset;
+    var viewportHeight = scrollView.Bounds.Height;
+    var viewTop = view.Bounds.Y;
+    var viewBottom = viewTop + view.Bounds.Height;
+    var viewportBottom = offset.Y + viewportHeight;
+
+    if (viewTop < offset.Y)
+    {
+        offset.Y = viewTop;
+    }
+    else if (viewBottom > viewportBottom)
+    {
+        offset.Y = viewBottom - viewportHeight;
+    }
+    else
+    {
+        return;
+    }
+
+    offset.Y = Math.Clamp(offset.Y, 0, Math.Max(0, scrollView.ContentSize.Height - viewportHeight));
+    scrollView.ContentOffset = offset;
+}
 
 window.Resized += _ => RefreshUi();
 
@@ -771,6 +841,21 @@ static ColorScheme CreateButtonHoverScheme()
         HotNormal = highlighted,
         HotFocus = highlighted,
         Disabled = highlighted,
+    };
+}
+
+static ColorScheme CreateButtonScheme()
+{
+    var normal = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
+    var focused = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightGreen);
+
+    return new ColorScheme
+    {
+        Normal = normal,
+        Focus = focused,
+        HotNormal = normal,
+        HotFocus = focused,
+        Disabled = normal,
     };
 }
 
