@@ -41,20 +41,36 @@ docker-ps
 
 ## Controls
 
-- `shift`+`q`: quit
-- `Tab` / `Shift`+`Tab`: move between action buttons
+- `q`: quit
+- `Left` / `Right`: select the previous/next button on the same row
+- `Up` / `Down`: select the closest button on the previous/next action row
 - `Enter` or `Space`: activate the focused button
+- Mouse wheel: scroll vertically (three lines per tick), independently of selection
+- Left click: select and activate a button
+
+Arrow navigation stops at the edges and keeps the selected button visible. After
+scrolling with the mouse, the next arrow resumes from the selection and brings its
+destination into view. Refreshes preserve selection by resource identity.
 
 ## Responsive behavior
 
 - The table adapts to the available width.
 - In narrow terminals, only essential columns are shown.
 - Long values are truncated with `…` to prevent layout breakage.
+- Tables use continuous Unicode borders; there is no horizontal scrolling.
+- Action columns retain enough space for complete buttons. Below 46 terminal
+  columns, a message asks you to enlarge the terminal.
 
 ## Build
 
 ```bash
 dotnet build FormattedDockerPs
+```
+
+Run the interaction regression checks (Terminal.Gui's fake driver, no Docker calls):
+
+```bash
+dotnet run --project tests/InteractionChecks
 ```
 
 ## Publish a Linux executable (single-file)

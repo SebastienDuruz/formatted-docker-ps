@@ -8,7 +8,6 @@ const int RefreshIntervalMs = 1000;
 Application.Init();
 var matrix = CreateMatrixScheme();
 var buttonScheme = CreateButtonScheme();
-var buttonHover = CreateButtonHoverScheme();
 
 var top = Application.Top;
 top.ColorScheme = matrix;
@@ -22,44 +21,28 @@ var window = new Window("Docker PS Monitor")
     ColorScheme = matrix,
 };
 
-var scrollView = new ScrollView
+var actionView = new ActionViewport
 {
     X = 0,
     Y = 0,
     Width = Dim.Fill(),
     Height = Dim.Fill(),
-    CanFocus = true,
-    AutoHideScrollBars = true,
-    ShowHorizontalScrollIndicator = false,
-    ShowVerticalScrollIndicator = true,
-};
-
-var tableView = new TextView
-{
-    X = 0,
-    Y = 0,
-    Width = Dim.Fill(),
-    Height = Dim.Fill(),
-    ReadOnly = true,
-    CanFocus = false,
-    WordWrap = false,
     ColorScheme = matrix,
+    ButtonScheme = buttonScheme,
 };
-
-scrollView.Add(tableView);
-window.Add(scrollView);
+window.Add(actionView);
 top.Add(window);
 
 var rows = new List<ContainerRow>();
 var volumes = new List<VolumeRow>();
 var networks = new List<NetworkRow>();
-var actionButtons = new List<Button>();
 string? lastError = null;
 string? volumeError = null;
 string? networkError = null;
 var lastRefresh = DateTime.Now;
 var refreshInProgress = false;
 var dockerCommandInProgress = false;
+var hasDockerState = false;
 
 void RefreshUi()
 {
@@ -90,6 +73,7 @@ void RefreshUi()
 
 void ApplyDockerState(DockerState state)
 {
+    hasDockerState = true;
     rows = state.Containers;
     volumes = state.Volumes;
     networks = state.Networks;
@@ -98,142 +82,58 @@ void ApplyDockerState(DockerState state)
     networkError = state.NetworkError;
     lastRefresh = DateTime.Now;
 
-    // Keep the vertical scroll position while the periodic refresh replaces the content.
-    var contentOffset = scrollView.ContentOffset;
-    contentOffset.X = 0;
+    RenderUi();
+}
+
+void RenderUi()
+{
+    if (Application.Current != top || !hasDockerState) return;
+
+    var width = actionView.Bounds.Width;
+    if (width < 44 || actionView.Bounds.Height < 1)
+    {
+        actionView.ShowSizeHint();
+        return;
+    }
+
     var layout = GetTableLayout(rows, volumes, networks, lastError, volumeError, networkError);
-    var contentHeight = layout.ContentHeight;
-    // The vertical indicator consumes one column. Reserve it before sizing the
-    // content; otherwise the content is one column too wide and ScrollView adds
-    // a horizontal scrollbar.
-    var visibleContentWidth = Math.Max(
-        1,
-        scrollView.Bounds.Width - (contentHeight > scrollView.Bounds.Height ? 1 : 0));
+    var containerColumns = PickColumns(width);
+    var containerWidths = ComputeWidths(containerColumns.Select(column => column.MinWidth).ToArray(), width);
+    var resourceWidths = ComputeWidths([12, 10, 8, 10], width);
+    var actions = new List<ViewportAction>();
+    var actionX = ActionColumnX(containerWidths);
 
-    tableView.Text = RenderTable(
-        rows,
-        volumes,
-        networks,
-        lastError,
-        volumeError,
-        networkError,
-        visibleContentWidth,
-        scrollView.Bounds.Height,
-        lastRefresh);
-
-    scrollView.ContentSize = new Size(visibleContentWidth, contentHeight);
-    tableView.Width = scrollView.ContentSize.Width;
-    tableView.Height = contentHeight;
-    RebuildActionButtons(rows, volumes, networks, lastError, volumeError, networkError, scrollView.ContentSize.Width, layout);
-    scrollView.ContentOffset = contentOffset;
-}
-
-void RebuildActionButtons(
-    IReadOnlyList<ContainerRow> containers,
-    IReadOnlyList<VolumeRow> volumeRows,
-    IReadOnlyList<NetworkRow> networkRows,
-    string? error,
-    string? volumesError,
-    string? networksError,
-    int width,
-    TablesLayout layout)
-{
-    // The content is refreshed every second. Remember the focused button so a
-    // keyboard user does not lose their place whenever the controls are rebuilt.
-    var focusedButtonIndex = actionButtons.FindIndex(button => button.HasFocus);
-
-    foreach (var button in actionButtons)
+    if (string.IsNullOrWhiteSpace(lastError))
     {
-        scrollView.Remove(button);
-    }
-
-    actionButtons.Clear();
-
-    if (string.IsNullOrWhiteSpace(error))
-    {
-        var columns = PickColumns(width);
-        var actionColumnIndex = Array.FindIndex(columns, column => column.Header == "ACTIONS");
-        var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), Math.Max(20, width));
-        var actionColumnX = 1 + columnWidths.Take(actionColumnIndex).Sum(columnWidth => columnWidth + 3) + 1;
-
-        foreach (var (container, index) in containers.Select((container, index) => (container, index)))
+        foreach (var (container, index) in rows.Select((row, index) => (row, index)))
         {
-            var action = container.IsRunning ? "Stop" : "Start";
-            var actionButton = new Button(actionColumnX, layout.Containers.FirstDataRowY + index, action) { ColorScheme = buttonScheme };
-            EnableHoverHighlight(actionButton);
-            actionButton.Clicked += () => ExecuteContainerAction(container, action.ToLowerInvariant());
-
-            var deleteButton = new Button(actionColumnX + actionButton.Bounds.Width + 1, layout.Containers.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
-            EnableHoverHighlight(deleteButton);
-            deleteButton.Clicked += () => DeleteContainer(container);
-            AddActionButton(actionButton);
-            AddActionButton(deleteButton);
+            var y = layout.Containers.FirstDataRowY + index;
+            var label = container.IsRunning ? "Stop" : "Start";
+            actions.Add(new($"container:{container.Id}:toggle", actionX, y, label,
+                () => ExecuteContainerAction(container, label.ToLowerInvariant())));
+            // Reserve the width of Start so changing state never shifts Delete.
+            actions.Add(new($"container:{container.Id}:delete", actionX + 10, y, "Delete",
+                () => DeleteContainer(container)));
         }
     }
 
-    var resourceActionX = GetResourceActionX(width);
-    if (string.IsNullOrWhiteSpace(volumesError))
-    {
-        foreach (var (volume, index) in volumeRows.Select((volume, index) => (volume, index)))
-        {
-            var deleteButton = new Button(resourceActionX, layout.Volumes.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
-            EnableHoverHighlight(deleteButton);
-            deleteButton.Clicked += () => DeleteVolume(volume);
-            AddActionButton(deleteButton);
-        }
-    }
+    var resourceX = ActionColumnX(resourceWidths);
+    if (string.IsNullOrWhiteSpace(volumeError))
+        foreach (var (volume, index) in volumes.Select((row, index) => (row, index)))
+            actions.Add(new($"volume:{volume.Name}:delete", resourceX, layout.Volumes.FirstDataRowY + index,
+                "Delete", () => DeleteVolume(volume)));
 
-    if (string.IsNullOrWhiteSpace(networksError))
-    {
-        foreach (var (network, index) in networkRows.Select((network, index) => (network, index)))
-        {
-            var deleteButton = new Button(resourceActionX, layout.Network.FirstDataRowY + index, "Delete") { ColorScheme = buttonScheme };
-            EnableHoverHighlight(deleteButton);
-            deleteButton.Clicked += () => DeleteNetwork(network);
-            AddActionButton(deleteButton);
-        }
-    }
+    if (string.IsNullOrWhiteSpace(networkError))
+        foreach (var (network, index) in networks.Select((row, index) => (row, index)))
+            actions.Add(new($"network:{network.Id}:delete", resourceX, layout.Network.FirstDataRowY + index,
+                "Delete", () => DeleteNetwork(network)));
 
-    var allContainersAction = containers.Any(container => container.IsRunning) ? "Stop all" : "Start all";
-    var allContainersButton = new Button(16, layout.GlobalActionsY, allContainersAction) { ColorScheme = buttonScheme };
-    EnableHoverHighlight(allContainersButton);
-    allContainersButton.Clicked += ToggleAllContainers;
-    AddActionButton(allContainersButton);
+    actions.Add(new("global:toggle", 16, layout.GlobalActionsY,
+        rows.Any(container => container.IsRunning) ? "Stop all" : "Start all", ToggleAllContainers));
+    actions.Add(new("global:purge", 30, layout.GlobalActionsY, "Purge all", PurgeAllDockerResources));
 
-    var purgeButton = new Button(29, layout.GlobalActionsY, "Purge all") { ColorScheme = buttonScheme };
-    EnableHoverHighlight(purgeButton);
-    purgeButton.Clicked += PurgeAllDockerResources;
-    AddActionButton(purgeButton);
-
-    if (focusedButtonIndex >= 0 && focusedButtonIndex < actionButtons.Count)
-    {
-        actionButtons[focusedButtonIndex].SetFocus();
-    }
-}
-
-void AddActionButton(Button button)
-{
-    // ScrollView is focusable for scrolling, so opt buttons into the tab order
-    // explicitly. Button then provides its normal Enter/Space activation.
-    button.CanFocus = true;
-    button.TabStop = true;
-    scrollView.Add(button);
-    actionButtons.Add(button);
-}
-
-void EnableHoverHighlight(Button button)
-{
-    button.MouseEnter += _ =>
-    {
-        button.ColorScheme = buttonHover;
-        button.SetNeedsDisplay();
-    };
-
-    button.MouseLeave += _ =>
-    {
-        button.ColorScheme = buttonScheme;
-        button.SetNeedsDisplay();
-    };
+    actionView.SetContent(RenderTable(rows, volumes, networks, lastError, volumeError, networkError,
+        containerColumns, containerWidths, resourceWidths, lastRefresh), layout.ContentHeight, actions);
 }
 
 void ExecuteContainerAction(ContainerRow container, string action) =>
@@ -351,85 +251,30 @@ using var timer = new System.Threading.Timer(_ =>
     Application.MainLoop?.Invoke(RefreshUi);
 }, null, dueTime: 0, period: RefreshIntervalMs);
 
-// Make the document scrollable with the mouse wheel even when a button has focus.
+// Only the main screen owns these inputs; modal dialogs retain their native controls.
 Application.RootMouseEvent += mouseEvent =>
 {
-    if (mouseEvent.Handled)
-    {
-        return;
-    }
-
-    if ((mouseEvent.Flags & MouseFlags.WheeledUp) != 0)
-    {
-        mouseEvent.Handled = scrollView.ScrollUp(3);
-    }
-    else if ((mouseEvent.Flags & MouseFlags.WheeledDown) != 0)
-    {
-        mouseEvent.Handled = scrollView.ScrollDown(3);
-    }
+    if (Application.Current == top && actionView.HandleWheel(mouseEvent.Flags))
+        mouseEvent.Handled = true;
 };
-
-// Handle quitting before the focused view can consume the key.
 Application.RootKeyEvent += keyEvent =>
 {
-    if (keyEvent.Key == Key.Q)
+    if (Application.Current != top) return false;
+    if (keyEvent.Key == (Key)'q')
     {
         Application.RequestStop();
         return true;
     }
-
-    if (keyEvent.Key == Key.Tab || keyEvent.Key == (Key.ShiftMask | Key.Tab))
-    {
-        FocusNextActionButton(keyEvent.Key == (Key.ShiftMask | Key.Tab));
-        return true;
-    }
-
-    // Ctrl+Q is deliberately ignored; q is the sole quit shortcut.
-    return keyEvent.Key == (Key.CtrlMask | Key.Q);
+    return actionView.HandleKey(keyEvent.Key);
 };
 
-void FocusNextActionButton(bool reverse)
+var renderedSize = Size.Empty;
+window.LayoutComplete += _ =>
 {
-    if (actionButtons.Count == 0)
-    {
-        return;
-    }
-
-    var focusedIndex = actionButtons.FindIndex(button => button.HasFocus);
-    var nextIndex = focusedIndex < 0
-        ? (reverse ? actionButtons.Count - 1 : 0)
-        : (focusedIndex + (reverse ? -1 : 1) + actionButtons.Count) % actionButtons.Count;
-    var nextButton = actionButtons[nextIndex];
-    nextButton.SetFocus();
-    ScrollIntoView(nextButton);
-}
-
-void ScrollIntoView(View view)
-{
-    var offset = scrollView.ContentOffset;
-    var viewportHeight = scrollView.Bounds.Height;
-    var viewTop = view.Bounds.Y;
-    var viewBottom = viewTop + view.Bounds.Height;
-    var viewportBottom = offset.Y + viewportHeight;
-
-    if (viewTop < offset.Y)
-    {
-        offset.Y = viewTop;
-    }
-    else if (viewBottom > viewportBottom)
-    {
-        offset.Y = viewBottom - viewportHeight;
-    }
-    else
-    {
-        return;
-    }
-
-    offset.Y = Math.Clamp(offset.Y, 0, Math.Max(0, scrollView.ContentSize.Height - viewportHeight));
-    scrollView.ContentOffset = offset;
-}
-
-window.Resized += _ => RefreshUi();
+    if (renderedSize == actionView.Bounds.Size) return;
+    renderedSize = actionView.Bounds.Size;
+    RenderUi();
+};
 
 Application.Run();
 Application.Shutdown();
@@ -585,28 +430,28 @@ static string RenderTable(
     string? error,
     string? volumeError,
     string? networkError,
-    int width,
-    int height,
+    Column[] columns,
+    int[] containerWidths,
+    int[] resourceWidths,
     DateTime refreshedAt)
 {
-    width = Math.Max(20, width);
     var sb = new StringBuilder();
-    AppendContainerTable(sb, rows, error, width);
-    AppendResourceTable(sb, "VOLUMES", volumes.Select(volume => new[] { volume.Name, volume.Driver, volume.Scope }), volumeError, width);
-    AppendResourceTable(sb, "NETWORKS", networks.Select(network => new[] { network.Name, network.Driver, network.Scope }), networkError, width);
-    sb.AppendLine($"Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss} | shift+q: quit");
-    sb.Append("GLOBAL ACTIONS");
+    AppendContainerTable(sb, rows, error, columns, containerWidths);
+    AppendResourceTable(sb, "VOLUMES", volumes.Select(volume => new[] { volume.Name, volume.Driver, volume.Scope }), volumeError, resourceWidths);
+    AppendResourceTable(sb, "NETWORKS", networks.Select(network => new[] { network.Name, network.Driver, network.Scope }), networkError, resourceWidths);
+    sb.AppendLine($"Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss}");
+    sb.AppendLine("GLOBAL ACTIONS");
+    sb.Append("↑↓←→: select | Enter/Space: act | q: quit | Wheel: scroll");
     return sb.ToString();
 }
 
-static void AppendContainerTable(StringBuilder sb, IReadOnlyList<ContainerRow> rows, string? error, int width)
+static void AppendContainerTable(StringBuilder sb, IReadOnlyList<ContainerRow> rows, string? error, Column[] columns, int[] columnWidths)
 {
-    var columns = PickColumns(width);
-    var columnWidths = ComputeWidths(columns.Select(column => column.MinWidth).ToArray(), width);
+    var merged = !string.IsNullOrWhiteSpace(error) || rows.Count == 0;
     sb.AppendLine("CONTAINERS");
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, "┌┬┐"));
     sb.AppendLine(RenderRow(columns.Select(column => column.Header).ToArray(), columnWidths));
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, merged ? "├┴┤" : "├┼┤"));
 
     if (!string.IsNullOrWhiteSpace(error))
     {
@@ -624,17 +469,17 @@ static void AppendContainerTable(StringBuilder sb, IReadOnlyList<ContainerRow> r
         }
     }
 
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, merged ? "└─┘" : "└┴┘"));
 }
 
-static void AppendResourceTable(StringBuilder sb, string title, IEnumerable<string[]> rows, string? error, int width)
+static void AppendResourceTable(StringBuilder sb, string title, IEnumerable<string[]> rows, string? error, int[] columnWidths)
 {
-    var columnWidths = ComputeWidths([12, 10, 8, 15], Math.Max(20, width));
     var resourceRows = rows.ToList();
+    var merged = !string.IsNullOrWhiteSpace(error) || resourceRows.Count == 0;
     sb.AppendLine(title);
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, "┌┬┐"));
     sb.AppendLine(RenderRow(["NAME", "DRIVER", "SCOPE", "ACTIONS"], columnWidths));
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, merged ? "├┴┤" : "├┼┤"));
 
     if (!string.IsNullOrWhiteSpace(error))
     {
@@ -652,7 +497,7 @@ static void AppendResourceTable(StringBuilder sb, string title, IEnumerable<stri
         }
     }
 
-    sb.AppendLine(HRule(columnWidths));
+    sb.AppendLine(HRule(columnWidths, merged ? "└─┘" : "└┴┘"));
 }
 
 static TablesLayout GetTableLayout(
@@ -671,11 +516,7 @@ static TablesLayout GetTableLayout(
 
 static int GetDisplayedRowCount(int count, string? error) => string.IsNullOrWhiteSpace(error) ? Math.Max(1, count) : 1;
 
-static int GetResourceActionX(int width)
-{
-    var columnWidths = ComputeWidths([12, 10, 8, 15], Math.Max(20, width));
-    return columnWidths.Take(3).Sum() + 11;
-}
+static int ActionColumnX(IReadOnlyList<int> widths) => 2 + widths.Take(widths.Count - 1).Sum(width => width + 3);
 
 // Small terminals show fewer columns instead of breaking layout.
 static Column[] PickColumns(int width)
@@ -686,7 +527,7 @@ static Column[] PickColumns(int width)
         [
             new("NAME", 10, r => r.Name),
             new("STATUS", 8, r => r.Status),
-            new("ACTIONS", 15, _ => string.Empty),
+            new("ACTIONS", 20, _ => string.Empty),
         ];
     }
 
@@ -697,7 +538,7 @@ static Column[] PickColumns(int width)
             new("NAME", 12, r => r.Name),
             new("STATUS", 10, r => r.Status),
             new("ID", 8, r => r.Id),
-            new("ACTIONS", 15, _ => string.Empty),
+            new("ACTIONS", 20, _ => string.Empty),
         ];
     }
 
@@ -709,7 +550,7 @@ static Column[] PickColumns(int width)
             new("STATUS", 10, r => r.Status),
             new("ID", 8, r => r.Id),
             new("IMAGE", 12, r => r.Image),
-            new("ACTIONS", 15, _ => string.Empty),
+            new("ACTIONS", 20, _ => string.Empty),
         ];
     }
 
@@ -720,7 +561,7 @@ static Column[] PickColumns(int width)
         new("ID", 8, r => r.Id),
         new("IMAGE", 12, r => r.Image),
         new("PORTS", 12, r => r.Ports),
-        new("ACTIONS", 15, _ => string.Empty),
+        new("ACTIONS", 20, _ => string.Empty),
     ];
 }
 
@@ -736,7 +577,7 @@ static int[] ComputeWidths(int[] minWidths, int totalWidth)
     while (used > budget)
     {
         var changed = false;
-        for (var i = widths.Length - 1; i >= 0 && used > budget; i--)
+        for (var i = widths.Length - 2; i >= 0 && used > budget; i--)
         {
             if (widths[i] > 4)
             {
@@ -763,24 +604,16 @@ static int[] ComputeWidths(int[] minWidths, int totalWidth)
     return widths;
 }
 
-static string HRule(IReadOnlyList<int> widths)
-{
-    var sb = new StringBuilder("+");
-    foreach (var w in widths)
-    {
-        sb.Append(' ', 1).Append('-', w).Append(' ', 1).Append('+');
-    }
-
-    return sb.ToString();
-}
+static string HRule(IReadOnlyList<int> widths, string joints) =>
+    joints[0] + string.Join(joints[1], widths.Select(width => new string('─', width + 2))) + joints[2];
 
 static string RenderRow(IReadOnlyList<string> values, IReadOnlyList<int> widths)
 {
-    var sb = new StringBuilder("|");
+    var sb = new StringBuilder("│");
     for (var i = 0; i < values.Count; i++)
     {
         var cell = Fit(values[i], widths[i]);
-        sb.Append(' ').Append(cell.PadRight(widths[i])).Append(' ').Append('|');
+        sb.Append(' ').Append(cell.PadRight(widths[i])).Append(' ').Append('│');
     }
 
     return sb.ToString();
@@ -788,13 +621,14 @@ static string RenderRow(IReadOnlyList<string> values, IReadOnlyList<int> widths)
 
 static string RenderMessageRow(IReadOnlyList<int> widths, string message)
 {
-    var contentWidth = widths.Sum() + (widths.Count * 3) - 1;
+    var contentWidth = widths.Sum() + (widths.Count * 3) - 3;
     var cell = Fit(message, contentWidth);
-    return $"| {cell.PadRight(contentWidth)} |";
+    return $"│ {cell.PadRight(contentWidth)} │";
 }
 
 static string Fit(string value, int width)
 {
+    value = value.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ');
     if (width <= 1)
     {
         return value.Length == 0 ? string.Empty : value[..1];
@@ -828,20 +662,6 @@ static ColorScheme CreateMatrixScheme()
     Colors.Menu = scheme;
 
     return scheme;
-}
-
-static ColorScheme CreateButtonHoverScheme()
-{
-    var highlighted = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightGreen);
-
-    return new ColorScheme
-    {
-        Normal = highlighted,
-        Focus = highlighted,
-        HotNormal = highlighted,
-        HotFocus = highlighted,
-        Disabled = highlighted,
-    };
 }
 
 static ColorScheme CreateButtonScheme()
@@ -887,6 +707,6 @@ sealed record TableLayout(int StartY, int DisplayedRowCount)
 sealed record TablesLayout(TableLayout Containers, TableLayout Volumes, TableLayout Network)
 {
     public int GlobalActionsY => Network.NextSectionY + 1;
-    public int ContentHeight => GlobalActionsY + 1;
+    public int ContentHeight => GlobalActionsY + 2;
 }
 sealed record Column(string Header, int MinWidth, Func<ContainerRow, string> Value);
