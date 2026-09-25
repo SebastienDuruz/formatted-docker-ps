@@ -1,9 +1,11 @@
 using Terminal.Gui;
 
-sealed record ViewportAction(string Id, int X, int Y, string Label, Action Invoke);
+namespace FormattedDockerPs.Presentation.Views;
+
+internal sealed record ViewportAction(string Id, int X, int Y, string Label, Action Invoke);
 
 // One clipped document, one vertical offset. Buttons keep their content coordinates.
-sealed class ActionViewport : View
+internal sealed class ActionViewport : View
 {
     readonly View document = new(new Rect(0, 0, 1, 1)) { CanFocus = true };
     readonly Label text = new(new Rect(0, 0, 1, 1), "") { CanFocus = false, AutoSize = false };
