@@ -13,6 +13,9 @@ internal sealed class MonitorScreen : IDisposable
     readonly MonitorController controller;
     readonly IMonitorDialogs dialogs;
     Size renderedSize = Size.Empty;
+    object? spinnerTimeout;
+
+    const int SpinnerIntervalMs = 100;
 
     public Window Window { get; }
     public ActionViewport Viewport { get; }
@@ -55,10 +58,28 @@ internal sealed class MonitorScreen : IDisposable
             Viewport.ShowSizeHint();
             return;
         }
-        var document = TableRenderer.Render(controller.State, Viewport.Bounds.Width, controller.LastRefresh);
+        var document = TableRenderer.Render(controller.State, Viewport.Bounds.Width, controller.LastRefresh,
+            controller.PendingOperations, Environment.TickCount64 / SpinnerIntervalMs);
         var actions = document.Actions.Select(action => new ViewportAction(
             action.Id, action.X, action.Y, action.Label, () => Activate(action.Request))).ToArray();
         Viewport.SetContent(document.Text, document.Height, actions);
+        AnimatePendingOperations();
+    }
+
+    // Re-render while operations are pending so their spinner keeps turning.
+    void AnimatePendingOperations()
+    {
+        if (spinnerTimeout is not null || controller.PendingOperations.Count == 0 || GuiApplication.MainLoop is null) return;
+        spinnerTimeout = GuiApplication.MainLoop.AddTimeout(TimeSpan.FromMilliseconds(SpinnerIntervalMs), _ =>
+        {
+            if (controller.PendingOperations.Count == 0)
+            {
+                spinnerTimeout = null;
+                return false;
+            }
+            Render();
+            return true;
+        });
     }
 
     void Activate(MonitorAction action)
@@ -94,6 +115,7 @@ internal sealed class MonitorScreen : IDisposable
 
     public void Dispose()
     {
+        if (spinnerTimeout is not null) GuiApplication.MainLoop?.RemoveTimeout(spinnerTimeout);
         GuiApplication.RootKeyEvent -= HandleKey;
         GuiApplication.RootMouseEvent -= HandleMouse;
         controller.StateChanged -= Render;

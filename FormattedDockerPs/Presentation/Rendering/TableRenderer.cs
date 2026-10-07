@@ -7,8 +7,11 @@ namespace FormattedDockerPs.Presentation.Rendering;
 internal static class TableRenderer
 {
     public const int MinimumContentWidth = 44;
+    const string SpinnerFrames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
-    public static RenderedDocument Render(DockerState state, int width, DateTime lastRefresh)
+    // Locked resources show their progress message in place of their buttons.
+    public static RenderedDocument Render(
+        DockerState state, int width, DateTime lastRefresh, IReadOnlyDictionary<string, string> pending, long frame)
     {
         var rows = state.Containers;
         var volumes = state.Volumes;
@@ -22,17 +25,20 @@ internal static class TableRenderer
         var resourceWidths = ComputeWidths([12, 10, 8, 10], width);
         var actions = new List<RenderedAction>();
         var actionX = ActionColumnX(containerWidths);
+        var spinner = SpinnerFrames[(int)(frame % SpinnerFrames.Length)];
+        string Progress(string key) => pending.TryGetValue(key, out var message) ? $"{spinner} {message}" : string.Empty;
 
         if (string.IsNullOrWhiteSpace(lastError))
         {
             foreach (var (container, index) in rows.Select((row, index) => (row, index)))
             {
+                if (pending.ContainsKey(ResourceKey.Container(container.Id))) continue;
                 var y = layout.Containers.FirstDataRowY + index;
                 var label = container.IsRunning ? "Stop" : "Start";
-                actions.Add(new($"container:{container.Id}:toggle", actionX, y, label,
+                actions.Add(new($"{ResourceKey.Container(container.Id)}:toggle", actionX, y, label,
                     new(container.IsRunning ? MonitorActionKind.StopContainer : MonitorActionKind.StartContainer, container.Id, container.Name)));
                 // Reserve the width of Start so changing state never shifts Delete.
-                actions.Add(new($"container:{container.Id}:delete", actionX + 10, y, "Delete",
+                actions.Add(new($"{ResourceKey.Container(container.Id)}:delete", actionX + 10, y, "Delete",
                     new(MonitorActionKind.DeleteContainer, container.Id, container.Name)));
             }
         }
@@ -40,20 +46,28 @@ internal static class TableRenderer
         var resourceX = ActionColumnX(resourceWidths);
         if (string.IsNullOrWhiteSpace(volumeError))
             foreach (var (volume, index) in volumes.Select((row, index) => (row, index)))
-                actions.Add(new($"volume:{volume.Name}:delete", resourceX, layout.Volumes.FirstDataRowY + index,
-                    "Delete", new(MonitorActionKind.DeleteVolume, volume.Name, volume.Name)));
+                if (!pending.ContainsKey(ResourceKey.Volume(volume.Name)))
+                    actions.Add(new($"{ResourceKey.Volume(volume.Name)}:delete", resourceX, layout.Volumes.FirstDataRowY + index,
+                        "Delete", new(MonitorActionKind.DeleteVolume, volume.Name, volume.Name)));
 
         if (string.IsNullOrWhiteSpace(networkError))
             foreach (var (network, index) in networks.Select((row, index) => (row, index)))
-                actions.Add(new($"network:{network.Id}:delete", resourceX, layout.Network.FirstDataRowY + index,
-                    "Delete", new(MonitorActionKind.DeleteNetwork, network.Id, network.Name)));
+                if (!pending.ContainsKey(ResourceKey.Network(network.Id)))
+                    actions.Add(new($"{ResourceKey.Network(network.Id)}:delete", resourceX, layout.Network.FirstDataRowY + index,
+                        "Delete", new(MonitorActionKind.DeleteNetwork, network.Id, network.Name)));
 
-        actions.Add(new("global:toggle", 17, layout.GlobalActionsY,
-            rows.Any(container => container.IsRunning) ? "Stop all" : "Start all", new(MonitorActionKind.ToggleAll)));
-        actions.Add(new("global:purge", 31, layout.GlobalActionsY, "Purge all", new(MonitorActionKind.PurgeAll)));
+        // Bulk actions wait for every pending operation, so they are locked by any of them.
+        var globalProgress = pending.Count == 0 ? string.Empty
+            : $"{spinner} {pending.GetValueOrDefault(ResourceKey.Global, "Actions in progress")}";
+        if (pending.Count == 0)
+        {
+            actions.Add(new($"{ResourceKey.Global}:toggle", 17, layout.GlobalActionsY,
+                rows.Any(container => container.IsRunning) ? "Stop all" : "Start all", new(MonitorActionKind.ToggleAll)));
+            actions.Add(new($"{ResourceKey.Global}:purge", 31, layout.GlobalActionsY, "Purge all", new(MonitorActionKind.PurgeAll)));
+        }
 
         return new(RenderTable(rows, volumes, networks, lastError, volumeError, networkError,
-            containerColumns, containerWidths, resourceWidths, lastRefresh), layout.ContentHeight, actions);
+            containerColumns, containerWidths, resourceWidths, lastRefresh, Progress, globalProgress), layout.ContentHeight, actions);
     }
 
     static string RenderTable(
@@ -66,19 +80,25 @@ internal static class TableRenderer
         Column[] columns,
         int[] containerWidths,
         int[] resourceWidths,
-        DateTime refreshedAt)
+        DateTime refreshedAt,
+        Func<string, string> progress,
+        string globalProgress)
     {
         var sb = new StringBuilder();
-        AppendContainerTable(sb, rows, error, columns, containerWidths);
-        AppendResourceTable(sb, "VOLUMES", volumes.Select(volume => new[] { volume.Name, volume.Driver, volume.Scope }), volumeError, resourceWidths);
-        AppendResourceTable(sb, "NETWORKS", networks.Select(network => new[] { network.Name, network.Driver, network.Scope }), networkError, resourceWidths);
+        AppendContainerTable(sb, rows, error, columns, containerWidths, progress);
+        AppendResourceTable(sb, "VOLUMES", volumes.Select(volume =>
+            new[] { volume.Name, volume.Driver, volume.Scope, progress(ResourceKey.Volume(volume.Name)) }), volumeError, resourceWidths);
+        AppendResourceTable(sb, "NETWORKS", networks.Select(network =>
+            new[] { network.Name, network.Driver, network.Scope, progress(ResourceKey.Network(network.Id)) }), networkError, resourceWidths);
         sb.AppendLine($" Containers: {rows.Count} | Volumes: {volumes.Count} | Networks: {networks.Count} | Refresh: {refreshedAt:HH:mm:ss}");
-        sb.AppendLine(" GLOBAL ACTIONS");
+        // Progress starts where the global buttons would be.
+        sb.AppendLine(globalProgress.Length == 0 ? " GLOBAL ACTIONS" : $" GLOBAL ACTIONS  {globalProgress}");
         sb.Append(" ↑↓←→: select | Enter/Space: act | q: quit | Wheel: scroll");
         return sb.ToString();
     }
 
-    static void AppendContainerTable(StringBuilder sb, IReadOnlyList<ContainerRow> rows, string? error, Column[] columns, int[] columnWidths)
+    static void AppendContainerTable(
+        StringBuilder sb, IReadOnlyList<ContainerRow> rows, string? error, Column[] columns, int[] columnWidths, Func<string, string> progress)
     {
         var merged = !string.IsNullOrWhiteSpace(error) || rows.Count == 0;
         sb.AppendLine(" CONTAINERS");
@@ -98,7 +118,10 @@ internal static class TableRenderer
         {
             foreach (var row in rows)
             {
-                sb.AppendLine(RenderRow(columns.Select(column => column.Value(row)).ToArray(), columnWidths));
+                var values = columns.Select(column => column.Value(row)).ToArray();
+                // ACTIONS is always the last column.
+                values[^1] = progress(ResourceKey.Container(row.Id));
+                sb.AppendLine(RenderRow(values, columnWidths));
             }
         }
 
@@ -126,7 +149,7 @@ internal static class TableRenderer
         {
             foreach (var row in resourceRows)
             {
-                sb.AppendLine(RenderRow([row[0], row[1], row[2], string.Empty], columnWidths));
+                sb.AppendLine(RenderRow(row, columnWidths));
             }
         }
 
