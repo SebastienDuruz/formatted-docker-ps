@@ -29,7 +29,8 @@ internal static class MonitorTheme
     public static ColorScheme CreateButtonScheme()
     {
         var normal = Terminal.Gui.Attribute.Make(Color.Green, Color.Black);
-        var focused = Terminal.Gui.Attribute.Make(Color.Black, Color.BrightGreen);
+        // No focus background: it would fill the whole terminal cell, line spacing included.
+        var focused = Terminal.Gui.Attribute.Make(Color.BrightGreen, Color.Black);
 
         return new ColorScheme
         {

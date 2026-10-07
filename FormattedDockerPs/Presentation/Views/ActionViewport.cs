@@ -9,7 +9,7 @@ internal sealed class ActionViewport : View
 {
     readonly View document = new(new Rect(0, 0, 1, 1)) { CanFocus = true };
     readonly Label text = new(new Rect(0, 0, 1, 1), "") { CanFocus = false, AutoSize = false };
-    readonly Dictionary<string, Button> buttons = new();
+    readonly Dictionary<string, ActionButton> buttons = new();
     IReadOnlyList<ViewportAction> actions = Array.Empty<ViewportAction>();
     string? selectedId;
     int scrollTop;
@@ -49,7 +49,7 @@ internal sealed class ActionViewport : View
         {
             if (!buttons.TryGetValue(action.Id, out var button))
             {
-                button = new Button(action.X, action.Y, action.Label) { ColorScheme = ButtonScheme };
+                button = new ActionButton(action.X, action.Y, action.Label) { ColorScheme = ButtonScheme };
                 var id = action.Id;
                 button.Clicked += () =>
                 {
@@ -61,8 +61,8 @@ internal sealed class ActionViewport : View
                 buttons.Add(id, button);
                 document.Add(button);
             }
-            button.Text = action.Label;
-            button.Frame = new Rect(action.X, action.Y, action.Label.Length + 4, 1);
+            button.Label = action.Label;
+            button.Frame = new Rect(action.X, action.Y, ActionButton.WidthOf(action.Label), 1);
         }
 
         if (selectedId is null || !nextIds.Contains(selectedId))

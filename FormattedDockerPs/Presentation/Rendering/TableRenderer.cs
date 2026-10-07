@@ -38,7 +38,7 @@ internal static class TableRenderer
                 actions.Add(new($"{ResourceKey.Container(container.Id)}:toggle", actionX, y, label,
                     new(container.IsRunning ? MonitorActionKind.StopContainer : MonitorActionKind.StartContainer, container.Id, container.Name)));
                 // Reserve the width of Start so changing state never shifts Delete.
-                actions.Add(new($"{ResourceKey.Container(container.Id)}:delete", actionX + 10, y, "Delete",
+                actions.Add(new($"{ResourceKey.Container(container.Id)}:delete", actionX + 8, y, "Delete",
                     new(MonitorActionKind.DeleteContainer, container.Id, container.Name)));
             }
         }
@@ -63,7 +63,7 @@ internal static class TableRenderer
         {
             actions.Add(new($"{ResourceKey.Global}:toggle", 17, layout.GlobalActionsY,
                 rows.Any(container => container.IsRunning) ? "Stop all" : "Start all", new(MonitorActionKind.ToggleAll)));
-            actions.Add(new($"{ResourceKey.Global}:purge", 31, layout.GlobalActionsY, "Purge all", new(MonitorActionKind.PurgeAll)));
+            actions.Add(new($"{ResourceKey.Global}:purge", 29, layout.GlobalActionsY, "Purge all", new(MonitorActionKind.PurgeAll)));
         }
 
         return new(RenderTable(rows, volumes, networks, lastError, volumeError, networkError,
